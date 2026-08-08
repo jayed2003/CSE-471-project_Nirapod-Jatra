@@ -1,0 +1,75 @@
+import { config } from "dotenv";
+config();
+config({ path: ".env.local", override: false });
+if (process.env.NODE_ENV !== "production" && !process.env.MONGODB_URI) config({ path: "atlas-credentials.env" });
+import cors from "cors";
+import bcrypt from "bcryptjs";
+import express from "express";
+import jwt from "jsonwebtoken";
+import rateLimit from "express-rate-limit";
+import helmet from "helmet";
+import webpush from "web-push";
+import { createServer } from "node:http";
+import { Server } from "socket.io";
+import { z } from "zod";
+import { connectDatabase } from "./db.js";
+import { EmergencyContact } from "./models/EmergencyContact.js";
+import { SosEvent } from "./models/SosEvent.js";
+import { Trip } from "./models/Trip.js";
+import { User } from "./models/User.js";
+import { baselineRisk, buildBrief } from "./risk.js";
+
+const app = express();
+const httpServer = createServer(app);
+const io = new Server(httpServer, { cors: { origin: process.env.CLIENT_ORIGIN ?? true } });
+const port = Number(process.env.PORT ?? 4000);
+if (process.env.VAPID_SUBJECT && process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) webpush.setVapidDetails(process.env.VAPID_SUBJECT, process.env.VAPID_PUBLIC_KEY, process.env.VAPID_PRIVATE_KEY);
+app.use(helmet());
+app.use(cors({ origin: process.env.CLIENT_ORIGIN ?? "http://localhost:3000" }));
+app.use(express.json({ limit: "64kb" }));
+app.use(rateLimit({ windowMs: 15 * 60 * 1000, limit: 120 }));
+
+type AuthRequest = express.Request & { userId?: string };
+function issueToken(userId: string) { const secret = process.env.JWT_SECRET; if (!secret) throw new Error("JWT_SECRET is required"); return jwt.sign({ sub: userId }, secret, { expiresIn: "7d" }); }
+function requireAuth(request: AuthRequest, response: express.Response, next: express.NextFunction) { try { const token = request.headers.authorization?.replace(/^Bearer\s+/i, ""); const secret = process.env.JWT_SECRET; if (!token || !secret) return response.status(401).json({ error: "Authentication required" }); const payload = jwt.verify(token, secret) as { sub?: string }; if (!payload.sub) return response.status(401).json({ error: "Authentication required" }); request.userId = payload.sub; next(); } catch { response.status(401).json({ error: "Authentication required" }); } }
+
+const pointSchema = z.object({ type: z.literal("Point").default("Point"), coordinates: z.tuple([z.number(), z.number()]) });
+const tripSchema = z.object({ destination: z.string().min(2).max(200), origin: z.tuple([z.number(), z.number()]).optional(), destinationPoint: z.tuple([z.number(), z.number()]), travelDates: z.object({ start: z.coerce.date(), end: z.coerce.date() }).refine(({ start, end }) => end >= start, "Return date must be after departure date") });
+const geocodeCache = new Map<string, { savedAt: number; place: { display_name: string; lon: string; lat: string } | null }>();
+const GEOCODE_CACHE_MS = 30 * 24 * 60 * 60 * 1000;
+function fallbackRoute(origin: [number, number], destination: [number, number]) {
+	const earthRadiusMeters = 6_371_000;
+	const radians = (degrees: number) => degrees * Math.PI / 180;
+	const latitudeDelta = radians(destination[1] - origin[1]);
+	const longitudeDelta = radians(destination[0] - origin[0]);
+	const distanceFormula = Math.sin(latitudeDelta / 2) ** 2 + Math.cos(radians(origin[1])) * Math.cos(radians(destination[1])) * Math.sin(longitudeDelta / 2) ** 2;
+	const distanceMeters = Math.round(earthRadiusMeters * 2 * Math.atan2(Math.sqrt(distanceFormula), Math.sqrt(1 - distanceFormula)));
+	return { geometry: { type: "LineString", coordinates: [origin, destination] }, distanceMeters, durationSeconds: Math.round(distanceMeters / 11) };
+}
+async function osrmRoute(origin: [number, number], destination: [number, number]) {
+	try {
+		const url = `https://router.project-osrm.org/route/v1/driving/${origin.join(",")};${destination.join(",")}?overview=full&geometries=geojson`;
+		const response = await fetch(url, { signal: AbortSignal.timeout(8_000) });
+		if (!response.ok) return fallbackRoute(origin, destination);
+		const body = await response.json() as { routes?: Array<{ geometry: unknown; distance: number; duration: number }> };
+		const route = body.routes?.[0];
+		return route ? { geometry: route.geometry, distanceMeters: route.distance, durationSeconds: route.duration } : fallbackRoute(origin, destination);
+	} catch { return fallbackRoute(origin, destination); }
+}
+app.get("/api/health", (_request, response) => response.json({ status: "ok" }));
+app.post("/api/auth/register", rateLimit({ windowMs: 60_000, limit: 5 }), async (request, response, next) => { try { const input = z.object({ email: z.string().email(), displayName: z.string().min(2).max(80), password: z.string().min(12).max(128), deviceName: z.string().min(2).max(80).default("Web browser") }).parse(request.body); const passwordHash = await bcrypt.hash(input.password, 12); const user = await User.create({ email: input.email, displayName: input.displayName, passwordHash, trustedDevices: [{ name: input.deviceName }] }); response.status(201).json({ token: issueToken(String(user._id)), user: { id: user._id, email: user.email, displayName: user.displayName } }); } catch (error) { if (error instanceof Error && "code" in error && error.code === 11000) return response.status(409).json({ error: "An account with that email already exists" }); next(error); } });
+app.post("/api/auth/login", rateLimit({ windowMs: 60_000, limit: 8 }), async (request, response, next) => { try { const input = z.object({ email: z.string().email(), password: z.string().min(1), deviceName: z.string().min(2).max(80).default("Web browser") }).parse(request.body); const user = await User.findOne({ email: input.email.toLowerCase() }).select("+passwordHash"); if (!user || !(await bcrypt.compare(input.password, user.passwordHash))) return response.status(401).json({ error: "Invalid email or password" }); user.trustedDevices.push({ name: input.deviceName, lastSeenAt: new Date(), createdAt: new Date() }); await user.save(); response.json({ token: issueToken(String(user._id)), user: { id: user._id, email: user.email, displayName: user.displayName } }); } catch (error) { next(error); } });
+app.get("/api/me", requireAuth, async (request: AuthRequest, response, next) => { try { const user = await User.findById(request.userId).lean(); if (!user) return response.status(404).json({ error: "User not found" }); const [contacts, trips] = await Promise.all([EmergencyContact.find({ userId: user._id }).sort({ priority: 1 }).lean(), Trip.find({ userId: user._id }).sort({ updatedAt: -1 }).limit(20).lean()]); response.json({ user: { id: user._id, email: user.email, displayName: user.displayName, trustedDevices: user.trustedDevices }, contacts, trips }); } catch (error) { next(error); } });
+app.put("/api/me", requireAuth, async (request: AuthRequest, response, next) => { try { const input = z.object({ displayName: z.string().min(2).max(80) }).parse(request.body); const user = await User.findByIdAndUpdate(request.userId, input, { new: true }); response.json({ id: user?._id, email: user?.email, displayName: user?.displayName }); } catch (error) { next(error); } });
+app.post("/api/contacts", requireAuth, async (request: AuthRequest, response, next) => { try { const input = z.object({ name: z.string().min(2).max(80), phone: z.string().min(7).max(30), email: z.string().email().optional(), priority: z.number().int().min(1).max(5).default(1) }).parse(request.body); response.status(201).json(await EmergencyContact.create({ ...input, userId: request.userId })); } catch (error) { next(error); } });
+app.post("/api/push-subscriptions", requireAuth, async (request: AuthRequest, response, next) => { try { const subscription = z.object({ endpoint: z.string().url(), keys: z.object({ p256dh: z.string().min(1), auth: z.string().min(1) }) }).parse(request.body); await User.findByIdAndUpdate(request.userId, { $addToSet: { pushSubscriptions: subscription } }); response.status(204).end(); } catch (error) { next(error); } });
+app.delete("/api/contacts/:id", requireAuth, async (request: AuthRequest, response, next) => { try { const contact = await EmergencyContact.findOneAndDelete({ _id: request.params.id, userId: request.userId }); if (!contact) return response.status(404).json({ error: "Contact not found" }); response.status(204).end(); } catch (error) { next(error); } });
+app.get("/api/geocode", async (request, response, next) => { try { const query = z.string().min(2).max(200).parse(request.query.q).trim(); const key = query.toLowerCase(); const cached = geocodeCache.get(key); if (cached && Date.now() - cached.savedAt < GEOCODE_CACHE_MS) return response.json(cached.place); const upstream = await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=${encodeURIComponent(query)}`, { headers: { "accept-language": "en", "user-agent": "WaymarkSafety/1.0 (local development)" } }); if (!upstream.ok) throw new Error("Location service is unavailable"); const place = ((await upstream.json()) as Array<{ display_name: string; lon: string; lat: string }>)[0] ?? null; geocodeCache.set(key, { savedAt: Date.now(), place }); response.json(place); } catch (error) { next(error); } });
+app.post("/api/trips", requireAuth, async (request: AuthRequest, response, next) => { try { const input = tripSchema.parse(request.body); const risk = baselineRisk(); const route = await osrmRoute(input.origin ?? input.destinationPoint, input.destinationPoint); const trip = await Trip.create({ userId: request.userId, destination: input.destination, travelDates: input.travelDates, route, currentRiskBrief: buildBrief(risk), riskHistory: [{ ...risk, summary: buildBrief(risk) }] }); response.status(201).json(trip); } catch (error) { next(error); } });
+app.get("/api/trips/:id", async (request, response, next) => { try { const trip = await Trip.findById(request.params.id).lean(); if (!trip) return response.status(404).json({ error: "Trip not found" }); response.json(trip); } catch (error) { next(error); } });
+app.post("/api/trips/:id/checkin", async (request, response, next) => { try { const deadline = new Date(Date.now() + 6 * 60 * 60 * 1000); const trip = await Trip.findByIdAndUpdate(request.params.id, { checkInDeadline: deadline }, { new: true }); if (!trip) return response.status(404).json({ error: "Trip not found" }); response.json({ checkInDeadline: trip.checkInDeadline }); } catch (error) { next(error); } });
+app.post("/api/sos", rateLimit({ windowMs: 60_000, limit: 5 }), async (request, response, next) => { try { const input = z.object({ userId: z.string().optional(), tripId: z.string().optional(), location: pointSchema.optional(), message: z.string().max(500).optional() }).parse(request.body); const event = await SosEvent.create(input); const contacts = input.userId ? await EmergencyContact.find({ userId: input.userId }).lean() : []; io.emit("sos:new", event); response.status(201).json({ event, contactsNotified: contacts.length }); } catch (error) { next(error); } });
+app.post("/api/internal/risk-check", async (request, response, next) => { try { const secret = process.env.CRON_SECRET; if (!secret || request.headers.authorization !== `Bearer ${secret}`) return response.status(401).json({ error: "Unauthorized" }); const risk = baselineRisk(); const summary = buildBrief(risk); const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000); const trips = await Trip.find({ "travelDates.end": { $gte: new Date() }, $or: [{ "riskHistory.timestamp": { $lt: dayAgo } }, { riskHistory: { $size: 0 } }] }).select("_id userId currentRiskBrief"); const changed = trips.filter((trip) => trip.currentRiskBrief !== summary); await Promise.all(trips.map(async (trip) => { if (trip.currentRiskBrief === summary) return; await Trip.findByIdAndUpdate(trip._id, { currentRiskBrief: summary, $push: { riskHistory: { ...risk, summary } } }); io.emit("risk:update", { tripId: trip._id, summary }); const user = await User.findById(trip.userId).select("pushSubscriptions").lean(); await Promise.all((user?.pushSubscriptions ?? []).map((subscription: Parameters<typeof webpush.sendNotification>[0]) => webpush.sendNotification(subscription, JSON.stringify({ title: "Nirapod Jatra risk update", body: summary, tripId: trip._id })).catch(() => undefined))); })); response.json({ checked: trips.length, updated: changed.length }); } catch (error) { next(error); } });
+app.get("/api/pois/nearby", async (request, response, next) => { try { const longitude = z.coerce.number().parse(request.query.lng); const latitude = z.coerce.number().parse(request.query.lat); const query = `[out:json];(nwr[amenity=hospital](around:5000,${latitude},${longitude});nwr[amenity=shelter](around:5000,${latitude},${longitude});nwr[amenity=police](around:5000,${latitude},${longitude});nwr[amenity=pharmacy](around:5000,${latitude},${longitude});nwr[office=embassy](around:5000,${latitude},${longitude}););out center;`; const upstream = await fetch("https://overpass-api.de/api/interpreter", { method: "POST", headers: { "content-type": "text/plain" }, body: query, signal: AbortSignal.timeout(10_000) }); if (!upstream.ok) throw new Error("POI service is unavailable"); response.json(await upstream.json()); } catch (error) { next(error); } });
+app.use((error: unknown, _request: express.Request, response: express.Response, _next: express.NextFunction) => { const message = error instanceof z.ZodError ? "Invalid request" : error instanceof Error ? error.message : "Unexpected error"; response.status(error instanceof z.ZodError ? 400 : 500).json({ error: message }); });
+connectDatabase().then(() => httpServer.listen(port, () => console.log(`Safety API listening on ${port}`))).catch((error) => { console.error("Database connection failed", error); process.exit(1); });

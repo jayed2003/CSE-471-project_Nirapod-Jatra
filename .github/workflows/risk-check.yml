@@ -1,0 +1,19 @@
+name: Risk Check
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+jobs:
+  refresh-risk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Request scheduled risk refresh
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          curl --fail --silent --show-error \
+            --request POST "$BACKEND_URL/api/internal/risk-check" \
+            --header "Authorization: Bearer $CRON_SECRET"

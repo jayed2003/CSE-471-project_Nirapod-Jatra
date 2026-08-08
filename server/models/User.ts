@@ -1,0 +1,4 @@
+import { model, models, Schema } from "mongoose";
+
+const UserSchema = new Schema({ email: { type: String, required: true, unique: true, lowercase: true, trim: true }, displayName: { type: String, required: true, trim: true }, passwordHash: { type: String, required: true, select: false }, pushSubscriptions: [{ endpoint: String, keys: { p256dh: String, auth: String } }], trustedDevices: [{ name: { type: String, required: true }, lastSeenAt: { type: Date, default: Date.now }, createdAt: { type: Date, default: Date.now } }] }, { timestamps: true });
+export const User = models.User || model("User", UserSchema);

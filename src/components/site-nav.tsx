@@ -1,0 +1,5 @@
+"use client";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
+export function SiteNav() { const path = usePathname(); const [online, setOnline] = useState(true); useEffect(() => { const sync = () => setOnline(navigator.onLine); sync(); window.addEventListener("online", sync); window.addEventListener("offline", sync); return () => { window.removeEventListener("online", sync); window.removeEventListener("offline", sync); }; }, []); return <><nav className="site-nav" aria-label="Primary navigation">{[["/", "Planner"], ["/trips", "Trips"], ["/emergency", "Emergency"], ["/account", "Account"]].map(([href, label]) => <Link key={href} href={href} className={path === href ? "active" : ""}>{label}</Link>)}</nav><div className={`network-status ${online ? "online" : "offline"}`} role="status">{online ? "Online" : "Offline · cached data active"}</div></>; }
