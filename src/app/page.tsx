@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import dynamic from "next/dynamic";
 import { ArrowRight, MapPin } from "lucide-react";
 import { cacheValue, readCachedValue } from "@/lib/offline";
@@ -47,6 +47,7 @@ export default function Home() {
   const [destination, setDestination] = useState("");
   const [departureDate, setDepartureDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [returnDate, setReturnDate] = useState(() => new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10));
+  const [activeTripId, setActiveTripId] = useState<string | null>(null);
   const [status, setStatus] = useState("Choose a destination and travel dates to load its route conditions.");
   const [checkIn, setCheckIn] = useState("Not scheduled");
   const [mapLocation, setMapLocation] = useState<{ center: [number, number]; label: string } | null>(null);
@@ -54,6 +55,14 @@ export default function Home() {
   const [travelDialogOpen, setTravelDialogOpen] = useState(false);
   const [travelBrief, setTravelBrief] = useState<string | null>(null);
   const [travelBriefLoading, setTravelBriefLoading] = useState(false);
+
+  useEffect(() => {
+    if (!activeTripId || !getToken() || !navigator.geolocation) return;
+    const watchId = navigator.geolocation.watchPosition((position) => {
+      void apiFetch(`/api/trips/${activeTripId}/shadow-profile`, { method: "PUT", body: JSON.stringify({ location: { type: "Point", coordinates: [position.coords.longitude, position.coords.latitude] } }) }).catch(() => undefined);
+    }, () => undefined, { enableHighAccuracy: true, maximumAge: 60_000, timeout: 15_000 });
+    return () => navigator.geolocation.clearWatch(watchId);
+  }, [activeTripId]);
 
   async function assessRoute(event: React.FormEvent) {
     event.preventDefault();
@@ -74,6 +83,7 @@ export default function Home() {
       const payload = { destination: place.display_name, origin: position ? [position.coords.longitude, position.coords.latitude] as [number, number] : undefined, destinationPoint: [Number(place.lon), Number(place.lat)] as [number, number], travelDates: { start: departureDate, end: returnDate } };
       const trip = await apiFetch<{ _id: string; currentRiskBrief: string; route?: { distanceMeters?: number; durationSeconds?: number } }>("/api/trips", { method: "POST", body: JSON.stringify(payload) });
       await cacheValue("trip", trip);
+      setActiveTripId(trip._id);
       const location = { center: payload.destinationPoint, label: place.display_name };
       setMapLocation(location);
       setStatus(trip.currentRiskBrief);
