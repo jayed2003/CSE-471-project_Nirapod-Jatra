@@ -38,6 +38,9 @@ atlas-credentials.env
 # vercel
 .vercel
 
+# local dev helper (not part of the app)
+server/dev-with-memory-db.ts
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

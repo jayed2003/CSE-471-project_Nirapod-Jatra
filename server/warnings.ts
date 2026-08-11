@@ -354,6 +354,100 @@ export async function nearestHospital(point: [number, number]): Promise<{ name: 
   return (await Promise.race([attempt, deadline])) ?? nearestCuratedHospital(point);
 }
 
+export type EmergencyServiceCategory = "hospital" | "fire" | "ambulance" | "police";
+
+export type NearbyEmergencyService = {
+  id: string;
+  name: string;
+  category: EmergencyServiceCategory;
+  point: [number, number];
+  distanceMeters: number;
+  phones: string[];
+};
+
+function categorizeEmergencyTags(elementTags: Record<string, string>): EmergencyServiceCategory | null {
+  if (elementTags.amenity === "hospital" || elementTags.amenity === "clinic" || elementTags.healthcare === "hospital" || elementTags.healthcare === "clinic") return "hospital";
+  if (elementTags.amenity === "fire_station") return "fire";
+  if (elementTags.emergency === "ambulance_station") return "ambulance";
+  if (elementTags.amenity === "police") return "police";
+  return null;
+}
+
+function extractPhones(elementTags: Record<string, string>): string[] {
+  const raw = elementTags.phone ?? elementTags["contact:phone"] ?? elementTags["emergency:phone"] ?? elementTags.mobile ?? elementTags["contact:mobile"];
+  if (!raw) return [];
+  return raw.split(/[;,]/).map((value) => value.trim()).filter(Boolean);
+}
+
+const EMERGENCY_SERVICES_CACHE = new Map<string, { savedAt: number; services: NearbyEmergencyService[] }>();
+const EMERGENCY_SERVICES_CACHE_MS = 3 * 60 * 1000;
+
+export type NearbyEmergencyServicesResult = { services: NearbyEmergencyService[]; degraded: boolean };
+
+export async function nearbyEmergencyServices(point: [number, number], radiusMeters = 400): Promise<NearbyEmergencyServicesResult> {
+  const [longitude, latitude] = point;
+  // Round to a ~110m grid so nearby repeat lookups (page reloads, refresh-location clicks) hit the cache
+  // instead of re-querying the often-overloaded public Overpass mirrors every time.
+  const cacheKey = `${latitude.toFixed(3)},${longitude.toFixed(3)},${radiusMeters}`;
+  const cached = EMERGENCY_SERVICES_CACHE.get(cacheKey);
+  if (cached && Date.now() - cached.savedAt < EMERGENCY_SERVICES_CACHE_MS) return { services: cached.services, degraded: false };
+
+  const around = `around:${radiusMeters},${latitude},${longitude}`;
+  const query = `[out:json][timeout:20];(nwr[amenity=hospital](${around});nwr[amenity=clinic](${around});nwr[healthcare=hospital](${around});nwr[amenity=fire_station](${around});nwr[emergency=ambulance_station](${around});nwr[amenity=police](${around}););out center tags;`;
+  const perInstanceTimeoutMs = 20_000;
+  const overallDeadline = new Promise<null>((resolve) => setTimeout(() => resolve(null), 22_000));
+
+  const queryInstance = async (instance: string): Promise<NearbyEmergencyService[] | null> => {
+    try {
+      const upstream = await fetch(instance, { method: "POST", headers: { "content-type": "text/plain", "user-agent": "WaymarkSafety/1.0 (local development)" }, body: query, signal: AbortSignal.timeout(perInstanceTimeoutMs) });
+      if (!upstream.ok) return null;
+      const body = await upstream.json() as { elements: Array<{ type: string; id: number; lat?: number; lon?: number; center?: { lat: number; lon: number }; tags?: Record<string, string> }> };
+      const services: NearbyEmergencyService[] = [];
+      for (const element of body.elements) {
+        const elementTags = element.tags ?? {};
+        const category = categorizeEmergencyTags(elementTags);
+        if (!category) continue;
+        const elementLatitude = element.lat ?? element.center?.lat;
+        const elementLongitude = element.lon ?? element.center?.lon;
+        if (elementLatitude === undefined || elementLongitude === undefined) continue;
+        const distanceMeters = Math.round(haversineKm(point, [elementLongitude, elementLatitude]) * 1000);
+        if (distanceMeters > radiusMeters) continue;
+        services.push({ id: `${element.type}/${element.id}`, name: elementTags.name ?? category[0].toUpperCase() + category.slice(1), category, point: [elementLongitude, elementLatitude], distanceMeters, phones: extractPhones(elementTags) });
+      }
+      const deduped: NearbyEmergencyService[] = [];
+      for (const candidate of services.sort((a, b) => b.phones.length - a.phones.length || a.distanceMeters - b.distanceMeters)) {
+        const isDuplicate = deduped.some((existing) => existing.category === candidate.category && haversineKm(existing.point, candidate.point) * 1000 < 60);
+        if (!isDuplicate) deduped.push(candidate);
+      }
+      return deduped.sort((a, b) => a.distanceMeters - b.distanceMeters);
+    } catch { return null; }
+  };
+
+  // Race all Overpass mirrors and take whichever succeeds first, rather than trying them one at a time —
+  // a single slow/overloaded mirror shouldn't block a healthy one from answering.
+  const firstSuccessful = (promises: Array<Promise<NearbyEmergencyService[] | null>>): Promise<NearbyEmergencyService[] | null> => {
+    return new Promise((resolve) => {
+      let remaining = promises.length;
+      if (remaining === 0) { resolve(null); return; }
+      for (const promise of promises) {
+        promise.then((value) => {
+          remaining -= 1;
+          if (value !== null) resolve(value);
+          else if (remaining === 0) resolve(null);
+        }).catch(() => { remaining -= 1; if (remaining === 0) resolve(null); });
+      }
+    });
+  };
+
+  const attempt = firstSuccessful(OVERPASS_INSTANCES.map(queryInstance));
+  const services = await Promise.race([attempt, overallDeadline]);
+  if (services) { EMERGENCY_SERVICES_CACHE.set(cacheKey, { savedAt: Date.now(), services }); return { services, degraded: false }; }
+  // The live lookup failed or timed out — this is NOT the same as "confirmed nothing nearby".
+  // Serve a stale cache entry if we have one, but always flag the result as degraded so callers
+  // don't mistake a failed check for a verified empty area.
+  return { services: cached?.services ?? [], degraded: true };
+}
+
 function tileAt(longitude: number, latitude: number, zoom: number) {
   const n = 2 ** zoom;
   const x = Math.floor(((longitude + 180) / 360) * n);
