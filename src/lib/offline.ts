@@ -28,3 +28,28 @@ export async function cleanupExpiredCache() {
     cursor = await cursor.continue();
   }
 }
+
+const TILE_CACHE = "offline-map-tiles";
+
+export async function primeOfflineMap(urls: string[], onProgress?: (loaded: number, total: number) => void) {
+  const cache = await caches.open(TILE_CACHE);
+  let loaded = 0;
+  for (const url of urls) {
+    try {
+      if (!(await cache.match(url))) {
+        const response = await fetch(url, { mode: "no-cors" });
+        if (response) await cache.put(url, response);
+      }
+    } catch { }
+    loaded += 1;
+    onProgress?.(loaded, urls.length);
+  }
+  return loaded;
+}
+
+export async function countCachedTiles(urls: string[]) {
+  const cache = await caches.open(TILE_CACHE);
+  let count = 0;
+  for (const url of urls) if (await cache.match(url)) count += 1;
+  return count;
+}

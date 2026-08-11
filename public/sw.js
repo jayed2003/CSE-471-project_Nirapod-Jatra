@@ -5,6 +5,7 @@ workbox.routing.registerRoute(({ request }) => request.destination === "document
 workbox.routing.registerRoute(({ request }) => ["image", "style", "script"].includes(request.destination), new workbox.strategies.StaleWhileRevalidate({ cacheName: "assets" }));
 const thirtyDays = new workbox.expiration.ExpirationPlugin({ maxEntries: 500, maxAgeSeconds: 30 * 24 * 60 * 60 });
 workbox.routing.registerRoute(({ url }) => url.hostname === "tiles.openfreemap.org", new workbox.strategies.CacheFirst({ cacheName: "map-tiles", plugins: [thirtyDays] }));
+workbox.routing.registerRoute(({ url }) => url.hostname === "tile.openstreetmap.org", new workbox.strategies.CacheFirst({ cacheName: "offline-map-tiles", plugins: [thirtyDays] }));
 workbox.routing.registerRoute(({ url }) => url.pathname === "/api/pois/nearby", new workbox.strategies.NetworkFirst({ cacheName: "nearby-pois", plugins: [thirtyDays] }));
 const queue = new workbox.backgroundSync.Queue("safety-actions", { maxRetentionTime: 60 * 24 });
 workbox.routing.registerRoute(({ url, request }) => request.method === "POST" && (url.pathname === "/api/sos" || /\/api\/trips\/[^/]+\/checkin$/.test(url.pathname)), async ({ event }) => { try { return await fetch(event.request.clone()); } catch { await queue.pushRequest({ request: event.request }); return new Response(JSON.stringify({ queued: true }), { status: 202, headers: { "content-type": "application/json" } }); } }, "POST");
