@@ -22,10 +22,7 @@ type ReadinessReport = {
 };
 
 async function fetchReport(tripId: string): Promise<ReadinessReport> {
-  const response = await fetch(`/api/readiness?tripId=${encodeURIComponent(tripId)}`, { headers: { authorization: `Bearer ${getToken()}` } });
-  const body = await response.json().catch(() => null) as { error?: string } | null;
-  if (!response.ok) throw new Error(body?.error ?? "Readiness check failed");
-  return body as ReadinessReport;
+  return apiFetch<ReadinessReport>(`/api/trips/${encodeURIComponent(tripId)}/readiness`);
 }
 
 export default function ReadinessPage() {
@@ -74,7 +71,7 @@ export default function ReadinessPage() {
     const tiles = report.offlineMap.tiles;
     setProgress({ loaded: 0, total: tiles.length });
     await primeOfflineMap(tiles, (loaded, total) => setProgress({ loaded, total }));
-    try { await fetch(`/api/readiness?tripId=${encodeURIComponent(selectedId)}`, { method: "POST", headers: { authorization: `Bearer ${getToken()}` } }); } catch { }
+    try { await apiFetch(`/api/trips/${encodeURIComponent(selectedId)}/readiness/offline`, { method: "POST" }); } catch { }
     setOfflineReady(true);
     setProgress(null);
   }

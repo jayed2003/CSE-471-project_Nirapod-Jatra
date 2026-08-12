@@ -1,9 +1,0 @@
-import { cached, fetchJson } from "./fetchJson";
-import { aqiLabel } from "@/utils/aqiMap";
-import type { AirQuality, AirQualityForecastPoint } from "./types";
-
-type AirResponse = { list: Array<{ dt: number; main: { aqi: number }; components: { pm2_5: number; pm10: number; o3: number; no2: number; so2: number; co: number; nh3: number } }> };
-function apiKey() { const key = process.env.OPENWEATHER_API_KEY; if (!key) throw new Error("OpenWeather API key is not configured"); return key; }
-export function normalizeAirQuality(item: AirResponse["list"][number]): AirQuality { return { aqi: item.main.aqi, label: aqiLabel(item.main.aqi), pm25: item.components.pm2_5, pm10: item.components.pm10, o3: item.components.o3, no2: item.components.no2, so2: item.components.so2, co: item.components.co, nh3: item.components.nh3, observedAt: new Date(item.dt * 1000).toISOString() }; }
-export function getAirQuality(latitude: number, longitude: number) { return cached("air-quality", latitude, longitude, async () => { const data = await fetchJson<AirResponse>(`https://api.openweathermap.org/data/2.5/air_pollution?lat=${latitude}&lon=${longitude}&appid=${apiKey()}`); return normalizeAirQuality(data.list[0]); }); }
-export function getAirQualityForecast(latitude: number, longitude: number) { return cached("air-forecast", latitude, longitude, async (): Promise<AirQualityForecastPoint[]> => { const data = await fetchJson<AirResponse>(`https://api.openweathermap.org/data/2.5/air_pollution/forecast?lat=${latitude}&lon=${longitude}&appid=${apiKey()}`); return data.list.filter((_, index) => index % 3 === 0).slice(0, 8).map(normalizeAirQuality); }); }

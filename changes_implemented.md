@@ -114,3 +114,46 @@ Documentation of all functional and UI changes made to the Nirapod Jatra project
   - Trip creation stores live AQI/weather + `destinationPoint`.
   - Risk-check detects an increase (saved AQI 1/Low → live AQI 4/High) and sets `riskAlert` itself.
   - `GET /api/risk-alerts` returns the alert for the owner; `POST /api/trips/:id/acknowledge` returns 204 and clears it; unauthenticated requests return 401.
+
+---
+
+## 7. All internal APIs moved onto the Node.js backend
+
+**Context:** the teacher's review flagged that several "internal" APIs were only
+Next.js route handlers calling external providers directly, so the app looked
+backend-less / client-side.
+
+### What changed
+
+- **Next.js route handlers deleted** (`src/app/api/*`): `geocode`, `environment`,
+  `routing`, `travel-brief`, `readiness` no longer exist in the Next.js app.
+- **Backend now owns every internal API.** New Express endpoints:
+  - `GET /api/environment` (weather + AQI, `scope=weather|air`) — logic moved
+    into new `server/weather.ts` (external Open-Meteo / OpenWeather calls kept).
+  - `GET /api/routing` — OSRM multi-route + scoring moved into `server/routing.ts`.
+  - `POST /api/travel-brief` — Gemini brief + fallback moved into
+    `server/travel-brief.ts`.
+  - `GET /api/geocode` — Nominatim call kept, but the response is normalized to
+    `{ lat, lon, displayName }` and returns 404 when no place is found (matches
+    what the client already expected).
+- **Proxying:** `next.config.ts` now declares `rewrites()` so every `/api/*`
+  browser request is forwarded to the backend at `NEXT_PUBLIC_API_BASE_URL`
+  (default `http://localhost:4000`).
+- **Client simplified to a single hop:** `apiFetch` in `src/lib/api-client.ts`
+  now uses relative `/api/*` paths (the rewrite routes them to the backend), and
+  `RoutingMap`'s POI lookup + `sos-button` also call relative `/api/*`.
+- **Readiness page** now calls the real backend endpoints directly:
+  `GET /api/trips/:id/readiness` and `POST /api/trips/:id/readiness/offline`;
+  the `/api/readiness` proxy route is gone.
+- **Weather service relocated to `server/weather.ts`**; the client keeps only
+  `src/services/weather/types.ts` for the type shapes used by cards/hooks.
+  `src/utils/aqiMap.ts` and `src/utils/weatherCodeMap.ts` are folded into the
+  server module. The weather normalization test moved to
+  `server/weather.test.ts` (still passing).
+
+### Result
+
+All internal APIs are now served only by the Node.js + MongoDB backend. External
+APIs (OpenWeather, Open-Meteo, OpenStreetMap/Nominatim/OSRM/Overpass, BMD/BWDB,
+Gemini) are still called, but always **server-side**. Running the full stack
+requires both processes (`npm run dev:all`).

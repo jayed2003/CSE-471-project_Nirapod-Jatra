@@ -1,6 +1,33 @@
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:4000";
 const TOKEN_KEY = "waymark-token";
 export function getToken() { return typeof window === "undefined" ? null : localStorage.getItem(TOKEN_KEY); }
 export function setToken(token: string) { localStorage.setItem(TOKEN_KEY, token); }
 export function clearToken() { localStorage.removeItem(TOKEN_KEY); }
-export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> { const response = await fetch(`${API_BASE}${path}`, { ...init, headers: { "content-type": "application/json", ...(getToken() ? { authorization: `Bearer ${getToken()}` } : {}), ...init.headers } }); if (!response.ok) { const body = await response.json().catch(() => null) as { error?: string } | null; throw new Error(body?.error ?? "Request failed"); } return response.status === 204 ? undefined as T : response.json() as Promise<T>; }
+
+function describeFailure(status: number, body: { error?: string; message?: string } | null) {
+  if (body?.error) return body.error;
+  if (typeof body?.message === "string" && body.message.trim()) return body.message;
+  if (status === 429) return "Too many requests. Please wait a minute and try again.";
+  if (status === 404 || status >= 500) return "Cannot reach the API. Start both apps with npm run dev:all.";
+  return "Request failed";
+}
+
+export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      ...init,
+      headers: {
+        "content-type": "application/json",
+        ...(getToken() ? { authorization: `Bearer ${getToken()}` } : {}),
+        ...init.headers,
+      },
+    });
+  } catch {
+    throw new Error("Cannot reach the server. Start both apps with npm run dev:all (port 3000 and 4000).");
+  }
+  if (!response.ok) {
+    const body = await response.json().catch(() => null) as { error?: string; message?: string } | null;
+    throw new Error(describeFailure(response.status, body));
+  }
+  return response.status === 204 ? undefined as T : response.json() as Promise<T>;
+}

@@ -1,9 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { aqiLabel } from "@/utils/aqiMap";
-import { weatherDescription } from "@/utils/weatherCodeMap";
-import { clearWeatherCache, cached } from "./fetchJson";
-import { normalizeCurrentWeather } from "./openMeteo";
-import { normalizeAirQuality } from "./openWeatherAir";
+import { aqiLabel, weatherDescription } from "./weather.js";
+import { clearWeatherCache, cached } from "./weather.js";
+import { normalizeCurrentWeather } from "./weather.js";
+import { normalizeAirQuality } from "./weather.js";
 
 describe("weather normalization", () => {
   it("normalizes Open-Meteo current weather", () => expect(normalizeCurrentWeather({ time: "2026-08-07T12:00", temperature_2m: 31, weathercode: 3, relative_humidity_2m: 72, wind_speed_10m: 11 })).toMatchObject({ temperature: 31, humidity: 72, description: "Overcast" }));
