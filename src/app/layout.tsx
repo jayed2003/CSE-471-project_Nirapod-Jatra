@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { AppToaster } from "@/components/AppToaster";
 import { PwaRegister } from "@/components/pwa-register";
 import { SiteNav } from "@/components/site-nav";
 
@@ -15,6 +16,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body>
         <PwaRegister />
         <SiteNav />
+        <AppToaster />
         {children}
       </body>
     </html>

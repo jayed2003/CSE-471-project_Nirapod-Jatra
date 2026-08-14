@@ -35,9 +35,18 @@ export default function Home() {
     setFocus(destination);
   }, []);
 
-  const handleSearch = useCallback((place: QuickPlace) => {
+  const handleSearch = useCallback(async (place: QuickPlace) => {
     setSearched(place);
     setFocus({ id: SEARCH_ID, name: place.name, lat: place.lat, lon: place.lon });
+    try {
+      const response = await fetch(`/api/environment?scope=air&lat=${place.lat}&lon=${place.lon}`);
+      if (!response.ok) return;
+      const environment = await response.json() as { current?: { aqi?: number } };
+      const aqi = environment.current?.aqi;
+      if (aqi === 4 || aqi === 5) window.dispatchEvent(new CustomEvent("app:aqi-alert", { detail: { destination: place.name, aqi } }));
+    } catch {
+      // The condition cards retain their own error state when live air data is unavailable.
+    }
   }, []);
 
   const destinations = useMemo<GlobeDestination[]>(() => searched ? [...PRESETS, { id: SEARCH_ID, name: searched.name, lat: searched.lat, lon: searched.lon }] : PRESETS, [searched]);

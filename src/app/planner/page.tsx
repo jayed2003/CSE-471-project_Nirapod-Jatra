@@ -95,6 +95,8 @@ export default function Home() {
       const nextEnvironment: Environment = { weather: weatherResult.status === "fulfilled" ? weatherResult.value : undefined, air: airResult.status === "fulfilled" ? airResult.value : undefined };
       setEnvironment(nextEnvironment);
       setStatus(destinationSummary(nextEnvironment));
+      const aqi = nextEnvironment.air?.current?.aqi;
+      if (aqi === 4 || aqi === 5) window.dispatchEvent(new CustomEvent("app:aqi-alert", { detail: { destination: place.displayName, aqi } }));
       const routeDistance = trip.route;
       const briefResponse = await fetch("/api/travel-brief", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ destination: place.displayName, distanceKm: routeDistance?.distanceMeters ? Number((routeDistance.distanceMeters / 1000).toFixed(1)) : undefined, durationMin: routeDistance?.durationSeconds ? Math.round(routeDistance.durationSeconds / 60) : undefined, temperature: nextEnvironment.weather?.current?.temperature, weather: nextEnvironment.weather?.current?.description, aqi: nextEnvironment.air?.current?.aqi, aqiLabel: nextEnvironment.air?.current?.label }) });
       if (briefResponse.ok) setTravelBrief((await briefResponse.json() as { brief: string }).brief);

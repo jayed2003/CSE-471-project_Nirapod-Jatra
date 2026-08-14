@@ -11,7 +11,7 @@ import { AirQualityForecastCard } from "@/components/AirQualityForecastCard";
 export type QuickPlace = { name: string; lat: number; lon: number };
 type PlaceResult = { lat: number; lon: number; displayName: string };
 
-type Props = { onDestinationSelected: (place: QuickPlace) => void };
+type Props = { onDestinationSelected: (place: QuickPlace) => void | Promise<void> };
 
 export function QuickConditions({ onDestinationSelected }: Props) {
   const [query, setQuery] = useState("");
@@ -37,7 +37,7 @@ export function QuickConditions({ onDestinationSelected }: Props) {
       }
       const nextPlace = { name: result.displayName.split(",")[0], lat: result.lat, lon: result.lon };
       setPlace(nextPlace);
-      onDestinationSelected(nextPlace);
+      void onDestinationSelected(nextPlace);
       setMessage(`Live conditions for ${result.displayName}.`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Unable to load this destination.");
