@@ -1,12 +1,23 @@
 importScripts("https://storage.googleapis.com/workbox-cdn/releases/7.1.0/workbox-sw.js");
 workbox.core.clientsClaim();
 workbox.core.skipWaiting();
+const OFFLINE_FALLBACK_CACHE = "offline-fallback";
+const OFFLINE_FALLBACK_URL = "/readiness";
+self.addEventListener("install", (event) => { event.waitUntil(caches.open(OFFLINE_FALLBACK_CACHE).then((cache) => cache.addAll([OFFLINE_FALLBACK_URL]).catch(() => undefined))); });
 workbox.routing.registerRoute(({ request }) => request.destination === "document", new workbox.strategies.NetworkFirst({ cacheName: "pages" }));
 workbox.routing.registerRoute(({ request }) => ["image", "style", "script"].includes(request.destination), new workbox.strategies.StaleWhileRevalidate({ cacheName: "assets" }));
 const thirtyDays = new workbox.expiration.ExpirationPlugin({ maxEntries: 500, maxAgeSeconds: 30 * 24 * 60 * 60 });
 workbox.routing.registerRoute(({ url }) => url.hostname === "tiles.openfreemap.org", new workbox.strategies.CacheFirst({ cacheName: "map-tiles", plugins: [thirtyDays] }));
 workbox.routing.registerRoute(({ url }) => url.hostname === "tile.openstreetmap.org", new workbox.strategies.CacheFirst({ cacheName: "offline-map-tiles", plugins: [thirtyDays] }));
 workbox.routing.registerRoute(({ url }) => url.pathname === "/api/pois/nearby", new workbox.strategies.NetworkFirst({ cacheName: "nearby-pois", plugins: [thirtyDays] }));
+workbox.routing.registerRoute(({ url }) => url.pathname === "/api/emergency-services/nearby", new workbox.strategies.NetworkFirst({ cacheName: "emergency-services", plugins: [thirtyDays] }));
+workbox.routing.setCatchHandler(async ({ event }) => {
+	if (event.request.destination === "document") {
+		const fallback = await caches.match(OFFLINE_FALLBACK_URL, { cacheName: OFFLINE_FALLBACK_CACHE }) ?? await caches.match(OFFLINE_FALLBACK_URL);
+		if (fallback) return fallback;
+	}
+	return Response.error();
+});
 const queue = new workbox.backgroundSync.Queue("safety-actions", { maxRetentionTime: 60 * 24 });
 workbox.routing.registerRoute(({ url, request }) => request.method === "POST" && (url.pathname === "/api/sos" || /\/api\/trips\/[^/]+\/checkin$/.test(url.pathname)), async ({ event }) => { try { return await fetch(event.request.clone()); } catch { await queue.pushRequest({ request: event.request }); return new Response(JSON.stringify({ queued: true }), { status: 202, headers: { "content-type": "application/json" } }); } }, "POST");
 self.addEventListener("push", (event) => { const payload = event.data ? event.data.json() : { title: "Nirapod Jatra", body: "Your trip safety conditions changed." }; event.waitUntil(self.registration.showNotification(payload.title, { body: payload.body, data: { tripId: payload.tripId } })); });

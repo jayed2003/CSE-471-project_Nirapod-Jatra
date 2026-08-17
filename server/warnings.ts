@@ -182,7 +182,7 @@ function sampleRoute(points: Array<[number, number]>, max = 80) {
   return Array.from({ length: max }, (_, index) => points[Math.floor(index * step)]);
 }
 
-function boundsOf(points: Array<[number, number]>) {
+export function boundsOf(points: Array<[number, number]>) {
   const bounds = { minLng: Infinity, minLat: Infinity, maxLng: -Infinity, maxLat: -Infinity };
   for (const [lng, lat] of points) {
     bounds.minLng = Math.min(bounds.minLng, lng);
@@ -448,7 +448,7 @@ export async function nearbyEmergencyServices(point: [number, number], radiusMet
   return { services: cached?.services ?? [], degraded: true };
 }
 
-function tileAt(longitude: number, latitude: number, zoom: number) {
+export function tileAt(longitude: number, latitude: number, zoom: number) {
   const n = 2 ** zoom;
   const x = Math.floor(((longitude + 180) / 360) * n);
   const latitudeRadians = latitude * Math.PI / 180;

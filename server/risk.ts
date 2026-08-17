@@ -41,7 +41,8 @@ export async function fetchLiveRisk(destinationPoint: [number, number], route?: 
       fetchFloodWarnings(),
     ]);
     const current = weather.current;
-    const aqi = Math.max(1, Math.min(5, air.list[0]?.main.aqi ?? 2));
+    const demoAqi = Number(process.env.DEMO_RISK_AQI);
+    const aqi = Number.isInteger(demoAqi) && demoAqi >= 1 && demoAqi <= 5 ? demoAqi : Math.max(1, Math.min(5, air.list[0]?.main.aqi ?? 2));
     const weatherAlert = SEVERE_WEATHER_CODES.has(current.weathercode) || current.temperature_2m >= 42 ? `Severe weather in effect` : undefined;
     const routePointsList = routePoints(route?.geometry);
     const floodStatus = routePointsList.length ? floodStatusForRoute(routePointsList, floods) : floodStatusFor(destinationPoint, floods);

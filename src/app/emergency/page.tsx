@@ -12,7 +12,7 @@ const MapPreview = dynamic(() => import("@/components/map-preview").then((module
   loading: () => <div className="map-loading">Loading map...</div>,
 });
 
-const CHECK_IN_SECONDS = 6 * 60 * 60;
+const CHECK_IN_SECONDS = 30;
 
 function currentLocation(): Promise<{ type: "Point"; coordinates: [number, number] } | null> {
   return new Promise((resolve) => {
@@ -38,6 +38,7 @@ export default function EmergencyPage() {
   const [checkinStatus, setCheckinStatus] = useState("");
   const [coords, setCoords] = useState<[number, number] | null>(null);
   const [locating, setLocating] = useState(true);
+  const [activeTripId, setActiveTripId] = useState<string | undefined>(undefined);
   const checkinAlertSent = useRef(false);
 
   async function refreshLocation() {
@@ -50,6 +51,12 @@ export default function EmergencyPage() {
   useEffect(() => {
     const timer = window.setTimeout(() => { void refreshLocation(); });
     return () => window.clearTimeout(timer);
+  }, []);
+
+  useEffect(() => {
+    apiFetch<{ trips: Array<{ _id: string; travelDates?: { end?: string } }> }>("/api/me")
+      .then((profile) => { const active = profile.trips.find((trip) => trip.travelDates?.end && new Date(trip.travelDates.end) >= new Date()); setActiveTripId(active?._id ?? profile.trips[0]?._id); })
+      .catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -67,7 +74,7 @@ export default function EmergencyPage() {
       try {
         const result = await apiFetch<{ contactsNotified: number; emailsSent: number }>("/api/sos", {
           method: "POST",
-          body: JSON.stringify({ message: "Missed check-in: the 6-hour check-in timer expired without confirmation.", ...(location ? { location } : {}) }),
+          body: JSON.stringify({ message: "Missed check-in: the 30-second check-in timer expired without confirmation.", ...(location ? { location } : {}) }),
         });
         setCheckinStatus(`Check-in window expired. Emailed ${result.emailsSent} of ${result.contactsNotified} emergency contact(s).`);
       } catch {
@@ -121,7 +128,7 @@ export default function EmergencyPage() {
             <Timer size={28} />
             <h2>Check on me</h2>
             <div className="countdown">{seconds === null ? "Not scheduled" : formatCountdown(seconds)}</div>
-            <button onClick={startCheckin}>Start 6-hour check-in</button>
+            <button onClick={startCheckin}>Start 30-second check-in</button>
             {seconds !== null && <button className="text-button" onClick={cancelCheckin}>Cancel countdown</button>}
             {checkinStatus && <p>{checkinStatus}</p>}
           </article>
@@ -134,7 +141,7 @@ export default function EmergencyPage() {
             {!locating && !coords && <p>Location unavailable. Allow location access in your browser to see the map.</p>}
             <button className="text-button" onClick={() => void refreshLocation()}>Refresh location</button>
           </article>
-          {!locating && coords && <EmergencyServicesPanel center={coords} />}
+          {!locating && coords && <EmergencyServicesPanel center={coords} tripId={activeTripId} />}
         </section>
       </main>
     </RequireAuth>
