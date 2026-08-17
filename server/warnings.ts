@@ -219,7 +219,7 @@ export function warningsNearRoute(geometry: unknown, alerts: BmdAlert[], floods:
   return warnings;
 }
 
-const OVERPASS_INSTANCES = ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"];
+export const OVERPASS_INSTANCES = ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"];
 
 const CURATED_SHELTERS: Array<{ name: string; point: [number, number] }> = [
   { name: "Dhaka Cyclone Shelter (Motijheel)", point: [90.4219, 23.7274] },
