@@ -2,10 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
-import { AlertTriangle, MapPin, Timer } from "lucide-react";
+import { AlertTriangle, MapPin, Share2, Timer } from "lucide-react";
 import { apiFetch } from "@/lib/api-client";
 import { RequireAuth } from "@/components/require-auth";
-import { EmergencyServicesPanel } from "@/components/EmergencyServicesPanel";
+import { EmergencyServicesPanel, type SelectedEmergencyService } from "@/components/EmergencyServicesPanel";
 
 const MapPreview = dynamic(() => import("@/components/map-preview").then((module) => module.MapPreview), {
   ssr: false,
@@ -13,14 +13,15 @@ const MapPreview = dynamic(() => import("@/components/map-preview").then((module
 });
 
 const CHECK_IN_SECONDS = 6 * 60 * 60;
+const SHARE_LOCATION_UPDATE_MIN_INTERVAL_MS = 10_000;
 
-function currentLocation(): Promise<{ type: "Point"; coordinates: [number, number] } | null> {
+function currentLocation(): Promise<{ type: "Point"; coordinates: [number, number]; accuracy: number } | null> {
   return new Promise((resolve) => {
     if (!navigator.geolocation) return resolve(null);
     navigator.geolocation.getCurrentPosition(
-      (position) => resolve({ type: "Point", coordinates: [position.coords.longitude, position.coords.latitude] }),
+      (position) => resolve({ type: "Point", coordinates: [position.coords.longitude, position.coords.latitude], accuracy: position.coords.accuracy }),
       () => resolve(null),
-      { timeout: 5000 },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 },
     );
   });
 }
@@ -37,14 +38,37 @@ export default function EmergencyPage() {
   const [status, setStatus] = useState("Ready");
   const [checkinStatus, setCheckinStatus] = useState("");
   const [coords, setCoords] = useState<[number, number] | null>(null);
+  const [accuracy, setAccuracy] = useState<number | null>(null);
   const [locating, setLocating] = useState(true);
   const checkinAlertSent = useRef(false);
+  const [selectedService, setSelectedService] = useState<SelectedEmergencyService | null>(null);
+  const [selectedServiceId, setSelectedServiceId] = useState<string | null>(null);
+  const mapCardRef = useRef<HTMLElement | null>(null);
+  const [sharing, setSharing] = useState(false);
+  const [shareUrl, setShareUrl] = useState("");
+  const [shareExpiresAt, setShareExpiresAt] = useState<Date | null>(null);
+  const [shareStatus, setShareStatus] = useState("Not sharing your live location.");
+  const shareTokenRef = useRef<string | null>(null);
+  const shareWatchId = useRef<number | null>(null);
+  const lastShareUpdateAt = useRef(0);
 
   async function refreshLocation() {
     setLocating(true);
     const location = await currentLocation();
     setCoords(location ? location.coordinates : null);
+    setAccuracy(location ? location.accuracy : null);
     setLocating(false);
+  }
+
+  function selectService(service: SelectedEmergencyService, id: string) {
+    setSelectedService(service);
+    setSelectedServiceId(id);
+    mapCardRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+
+  function clearSelectedService() {
+    setSelectedService(null);
+    setSelectedServiceId(null);
   }
 
   useEffect(() => {
@@ -65,11 +89,12 @@ export default function EmergencyPage() {
     (async () => {
       const location = await currentLocation();
       try {
-        const result = await apiFetch<{ contactsNotified: number; emailsSent: number }>("/api/sos", {
+        const result = await apiFetch<{ contactsNotified: number; emailsSent: number; testMode?: boolean }>("/api/sos", {
           method: "POST",
           body: JSON.stringify({ message: "Missed check-in: the 6-hour check-in timer expired without confirmation.", ...(location ? { location } : {}) }),
         });
-        setCheckinStatus(`Check-in window expired. Emailed ${result.emailsSent} of ${result.contactsNotified} emergency contact(s).`);
+        const testNote = result.testMode ? " (test mode — SMTP isn't configured yet, so nothing reached a real inbox)" : "";
+        setCheckinStatus(`Check-in window expired. Emailed ${result.emailsSent} of ${result.contactsNotified} emergency contact(s).${testNote}`);
       } catch {
         setCheckinStatus("Check-in window expired, but we couldn't reach the server to notify contacts.");
       }
@@ -80,14 +105,64 @@ export default function EmergencyPage() {
     setStatus("Sending SOS...");
     const location = await currentLocation();
     try {
-      const result = await apiFetch<{ contactsNotified: number; emailsSent: number }>("/api/sos", {
+      const result = await apiFetch<{ contactsNotified: number; emailsSent: number; testMode?: boolean }>("/api/sos", {
         method: "POST",
         body: JSON.stringify({ message: "Emergency SOS requested", ...(location ? { location } : {}) }),
       });
-      setStatus(result.contactsNotified === 0 ? "SOS recorded. Add an emergency contact so someone gets notified next time." : `SOS recorded. Emailed ${result.emailsSent} of ${result.contactsNotified} emergency contact(s).`);
+      const testNote = result.testMode ? " (test mode — SMTP isn't configured yet, so nothing reached a real inbox)" : "";
+      setStatus(result.contactsNotified === 0 ? "SOS recorded. Add an emergency contact so someone gets notified next time." : `SOS recorded. Emailed ${result.emailsSent} of ${result.contactsNotified} emergency contact(s).${testNote}`);
     } catch {
       setStatus("SOS queued for background sync when connected.");
     }
+  }
+
+  useEffect(() => () => { if (shareWatchId.current !== null) navigator.geolocation?.clearWatch(shareWatchId.current); }, []);
+
+  async function startSharing() {
+    setShareStatus("Starting live location share...");
+    const location = await currentLocation();
+    if (!location) { setShareStatus("Location unavailable. Allow location access to share your live location."); return; }
+    try {
+      const result = await apiFetch<{ token: string; shareUrl: string; expiresAt: string; contactsNotified: number; emailsSent: number; testMode?: boolean }>("/api/location-share/start", {
+        method: "POST",
+        body: JSON.stringify({ location: { type: location.type, coordinates: location.coordinates }, accuracy: location.accuracy, durationMinutes: CHECK_IN_SECONDS / 60 }),
+      });
+      shareTokenRef.current = result.token;
+      lastShareUpdateAt.current = Date.now();
+      setShareUrl(result.shareUrl);
+      setShareExpiresAt(new Date(result.expiresAt));
+      setSharing(true);
+      const testNote = result.testMode ? " (test mode — SMTP isn't configured yet, so nothing reached a real inbox)" : "";
+      setShareStatus(result.contactsNotified === 0 ? "Sharing started. Add an emergency contact so someone gets the link next time." : `Sharing started. Emailed the live link to ${result.emailsSent} of ${result.contactsNotified} emergency contact(s).${testNote}`);
+      if (navigator.geolocation) {
+        shareWatchId.current = navigator.geolocation.watchPosition(
+          (position) => {
+            const now = Date.now();
+            const token = shareTokenRef.current;
+            if (!token || now - lastShareUpdateAt.current < SHARE_LOCATION_UPDATE_MIN_INTERVAL_MS) return;
+            lastShareUpdateAt.current = now;
+            void apiFetch(`/api/location-share/${token}/location`, {
+              method: "PUT",
+              body: JSON.stringify({ location: { type: "Point", coordinates: [position.coords.longitude, position.coords.latitude] }, accuracy: position.coords.accuracy }),
+            }).catch(() => undefined);
+          },
+          () => undefined,
+          { enableHighAccuracy: true, maximumAge: 5_000 },
+        );
+      }
+    } catch (reason) {
+      setShareStatus(reason instanceof Error ? reason.message : "Could not start live location sharing.");
+    }
+  }
+
+  async function stopSharing() {
+    if (shareWatchId.current !== null) { navigator.geolocation.clearWatch(shareWatchId.current); shareWatchId.current = null; }
+    shareTokenRef.current = null;
+    setSharing(false);
+    setShareUrl("");
+    setShareExpiresAt(null);
+    setShareStatus("Sharing stopped.");
+    try { await apiFetch("/api/location-share/stop", { method: "POST" }); } catch { /* already stopped locally */ }
   }
 
   function startCheckin() {
@@ -125,16 +200,45 @@ export default function EmergencyPage() {
             {seconds !== null && <button className="text-button" onClick={cancelCheckin}>Cancel countdown</button>}
             {checkinStatus && <p>{checkinStatus}</p>}
           </article>
-          <article className="emergency-map-card">
+          <article>
+            <Share2 size={28} />
+            <h2>Share live location</h2>
+            {sharing && <div className="monitoring"><span /> Live</div>}
+            <p>{shareStatus}</p>
+            {!sharing ? (
+              <button onClick={() => void startSharing()}>Start sharing (6 hours)</button>
+            ) : (
+              <>
+                <p className="services-status">Link: <a href={shareUrl} target="_blank" rel="noreferrer">{shareUrl}</a></p>
+                {shareExpiresAt && <p className="services-status">Live until {shareExpiresAt.toLocaleString()}</p>}
+                <button className="text-button" onClick={() => void stopSharing()}>Stop sharing</button>
+              </>
+            )}
+          </article>
+          <article className="emergency-map-card" ref={mapCardRef}>
             <MapPin size={28} />
             <h2>Nearby now</h2>
-            <p>Your current location, shown for reference only. Nothing here is shared unless you send an SOS.</p>
+            <p>{selectedService ? <>Showing <strong>{selectedService.name}</strong> relative to your current location.</> : "Your current location, shown for reference only. Nothing here is shared unless you send an SOS."}</p>
             {locating && <div className="map-loading">Finding your location...</div>}
-            {!locating && coords && <MapPreview center={coords} label="You are here" zoom={15} />}
+            {!locating && coords && (
+              <MapPreview
+                center={selectedService ? selectedService.point : coords}
+                label={selectedService ? selectedService.name : "You are here"}
+                zoom={15}
+                secondaryMarker={selectedService ? { point: coords, label: "You are here" } : undefined}
+              />
+            )}
+            {!locating && coords && accuracy !== null && (
+              <p className="services-status">
+                Reported accuracy: ~{accuracy >= 1000 ? `${(accuracy / 1000).toFixed(1)} km` : `${Math.round(accuracy)} m`}
+                {accuracy > 300 && " — this is a Wi-Fi/IP position estimate, not GPS, so it can land a neighborhood off (even when the browser reports a small accuracy number, the underlying Wi-Fi location database can be stale for this area). Open this page on a phone with GPS enabled for a precise fix, or check Windows Settings → Privacy & security → Location is on for your browser."}
+              </p>
+            )}
             {!locating && !coords && <p>Location unavailable. Allow location access in your browser to see the map.</p>}
             <button className="text-button" onClick={() => void refreshLocation()}>Refresh location</button>
+            {selectedService && <button className="text-button" onClick={clearSelectedService}>Show my location only</button>}
           </article>
-          {!locating && coords && <EmergencyServicesPanel center={coords} />}
+          {!locating && coords && <EmergencyServicesPanel center={coords} onSelect={selectService} selectedId={selectedServiceId} />}
         </section>
       </main>
     </RequireAuth>

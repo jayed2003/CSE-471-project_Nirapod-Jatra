@@ -2,11 +2,12 @@
 
 import { useEffect, useState } from "react";
 import type { MouseEvent } from "react";
-import { Ambulance, Flame, Hospital, Phone, RefreshCw, ShieldAlert } from "lucide-react";
+import { Ambulance, Flame, Hospital, MapPinned, Phone, RefreshCw, ShieldAlert } from "lucide-react";
 import { apiFetch } from "@/lib/api-client";
 
 type EmergencyServiceCategory = "hospital" | "fire" | "ambulance" | "police";
-type NearbyEmergencyService = { id: string; name: string; category: EmergencyServiceCategory; distanceMeters: number; phones: string[] };
+type NearbyEmergencyService = { id: string; name: string; category: EmergencyServiceCategory; point: [number, number]; distanceMeters: number; phones: string[] };
+export type SelectedEmergencyService = { name: string; point: [number, number] };
 
 const CATEGORY_ICON: Record<EmergencyServiceCategory, typeof Hospital> = {
   hospital: Hospital,
@@ -28,7 +29,7 @@ function formatDistance(meters: number) {
   return meters >= 1000 ? `${(meters / 1000).toFixed(1)} km away` : `${meters} m away`;
 }
 
-export function EmergencyServicesPanel({ center }: { center: [number, number] }) {
+export function EmergencyServicesPanel({ center, onSelect, selectedId }: { center: [number, number]; onSelect?: (service: SelectedEmergencyService, id: string) => void; selectedId?: string | null }) {
   const [services, setServices] = useState<NearbyEmergencyService[]>([]);
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [degraded, setDegraded] = useState(false);
@@ -81,7 +82,19 @@ export function EmergencyServicesPanel({ center }: { center: [number, number] })
                       const Icon = CATEGORY_ICON[service.category];
                       return (
                         <li key={service.id}>
-                          <div className="service-name"><Icon size={15} /><strong>{service.name}</strong><span>{formatDistance(service.distanceMeters)}</span></div>
+                          <div className="service-name">
+                            <Icon size={15} />
+                            <strong>{service.name}</strong><span>{formatDistance(service.distanceMeters)}</span>
+                            <button
+                              type="button"
+                              className={`service-locate${selectedId === service.id ? " selected" : ""}`}
+                              onClick={() => onSelect?.({ name: service.name, point: service.point }, service.id)}
+                              aria-label={`Show ${service.name} on the map`}
+                              title={`Show ${service.name} on the map`}
+                            >
+                              <MapPinned size={13} />
+                            </button>
+                          </div>
                           <div className="service-phones">
                             {service.phones.length === 0 && <span className="no-number">No number listed</span>}
                             {service.phones.map((phone) => (

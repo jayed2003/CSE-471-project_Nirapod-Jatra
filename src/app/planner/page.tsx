@@ -7,6 +7,7 @@ import { cacheValue, readCachedValue } from "@/lib/offline";
 import { WeatherCard } from "@/components/WeatherCard";
 import { AirQualityCard } from "@/components/AirQualityCard";
 import { TravelRecommendationDialog } from "@/components/TravelRecommendationDialog";
+import { TouristExplorer } from "@/components/TouristExplorer";
 import { apiFetch, getToken } from "@/lib/api-client";
 import { RequireAuth } from "@/components/require-auth";
 import { RiskRow } from "@/components/risk-row";
@@ -31,8 +32,8 @@ function currentPosition() {
       window.clearTimeout(timeout);
       resolve(position);
     };
-    const timeout = window.setTimeout(() => finish(null), 5_000);
-    navigator.geolocation.getCurrentPosition((position) => finish(position), () => finish(null), { maximumAge: 60_000, timeout: 4_500 });
+    const timeout = window.setTimeout(() => finish(null), 10_000);
+    navigator.geolocation.getCurrentPosition((position) => finish(position), () => finish(null), { enableHighAccuracy: true, maximumAge: 60_000, timeout: 9_500 });
   });
 }
 
@@ -133,6 +134,7 @@ export default function Home() {
         <article className="panel conditions"><h2>Conditions · {mapLocation ? `${mapLocation.label.split(",")[0]} route` : "Awaiting destination"}</h2>{environment ? <div className="readouts"><RiskRow label="AQI" value={environment.air?.current?.aqi?.toString() ?? "--"} state={environment.air?.current?.label ?? "Unavailable"} level={environment.air?.current && environment.air.current.aqi > 2 ? "caution" : "safe"} segments={environment.air?.current ? Math.min(environment.air.current.aqi, 5) : 0} /><RiskRow label="Flood" value="--" state="No live feed" level="safe" segments={0} /><RiskRow label="Dengue" value="--" state="No live feed" level="safe" segments={0} /><RiskRow label="Weather" value={environment.weather?.current ? `${Math.round(environment.weather.current.temperature)}°` : "--"} state={environment.weather?.current?.description ?? "Unavailable"} level="safe" segments={environment.weather?.current ? 1 : 0} /><RiskRow label="Unrest" value="--" state="No live feed" level="safe" segments={0} /></div> : <p className="conditions-empty">Live weather and air quality appear here after you plan a destination.</p>}<div className="brief"><p>{status}</p><span>Daily risk checks send an update only when conditions change · saved briefs stay available offline for 30 days</span></div></article>
       </section>
       <RoutingMap />
+      <TouristExplorer />
       {mapLocation && <section className="environment-grid" aria-label={`Live environmental conditions for ${mapLocation.label}`}>
         <WeatherCard key={`weather-${mapLocation.center.join(",")}`} lat={mapLocation.center[1]} lon={mapLocation.center[0]} />
         <AirQualityCard key={`air-${mapLocation.center.join(",")}`} lat={mapLocation.center[1]} lon={mapLocation.center[0]} />

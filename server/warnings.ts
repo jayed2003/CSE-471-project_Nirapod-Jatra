@@ -219,7 +219,23 @@ export function warningsNearRoute(geometry: unknown, alerts: BmdAlert[], floods:
   return warnings;
 }
 
-const OVERPASS_INSTANCES = ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"];
+export const OVERPASS_INSTANCES = ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"];
+
+// Races several async lookups (e.g. multiple Overpass mirrors) and takes whichever succeeds first,
+// rather than trying them one at a time — a single slow/overloaded provider shouldn't block a healthy one.
+export function raceFirstSuccessful<T>(promises: Array<Promise<T | null>>): Promise<T | null> {
+  return new Promise((resolve) => {
+    let remaining = promises.length;
+    if (remaining === 0) { resolve(null); return; }
+    for (const promise of promises) {
+      promise.then((value) => {
+        remaining -= 1;
+        if (value !== null) resolve(value);
+        else if (remaining === 0) resolve(null);
+      }).catch(() => { remaining -= 1; if (remaining === 0) resolve(null); });
+    }
+  });
+}
 
 const CURATED_SHELTERS: Array<{ name: string; point: [number, number] }> = [
   { name: "Dhaka Cyclone Shelter (Motijheel)", point: [90.4219, 23.7274] },
@@ -423,23 +439,7 @@ export async function nearbyEmergencyServices(point: [number, number], radiusMet
     } catch { return null; }
   };
 
-  // Race all Overpass mirrors and take whichever succeeds first, rather than trying them one at a time —
-  // a single slow/overloaded mirror shouldn't block a healthy one from answering.
-  const firstSuccessful = (promises: Array<Promise<NearbyEmergencyService[] | null>>): Promise<NearbyEmergencyService[] | null> => {
-    return new Promise((resolve) => {
-      let remaining = promises.length;
-      if (remaining === 0) { resolve(null); return; }
-      for (const promise of promises) {
-        promise.then((value) => {
-          remaining -= 1;
-          if (value !== null) resolve(value);
-          else if (remaining === 0) resolve(null);
-        }).catch(() => { remaining -= 1; if (remaining === 0) resolve(null); });
-      }
-    });
-  };
-
-  const attempt = firstSuccessful(OVERPASS_INSTANCES.map(queryInstance));
+  const attempt = raceFirstSuccessful(OVERPASS_INSTANCES.map(queryInstance));
   const services = await Promise.race([attempt, overallDeadline]);
   if (services) { EMERGENCY_SERVICES_CACHE.set(cacheKey, { savedAt: Date.now(), services }); return { services, degraded: false }; }
   // The live lookup failed or timed out — this is NOT the same as "confirmed nothing nearby".
