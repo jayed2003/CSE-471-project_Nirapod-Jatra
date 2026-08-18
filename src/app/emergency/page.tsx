@@ -6,6 +6,10 @@ import { AlertTriangle, MapPin, Share2, Timer } from "lucide-react";
 import { apiFetch } from "@/lib/api-client";
 import { RequireAuth } from "@/components/require-auth";
 import { EmergencyServicesPanel, type SelectedEmergencyService } from "@/components/EmergencyServicesPanel";
+import { SosScriptPanel } from "@/components/sos-script-panel";
+import { VoiceSosArm } from "@/components/voice-sos-arm";
+import type { ScriptContact } from "@/components/sos-script-view";
+import type { SafeWordSetting } from "@/lib/safe-word";
 
 const MapPreview = dynamic(() => import("@/components/map-preview").then((module) => module.MapPreview), {
   ssr: false,
@@ -15,16 +19,20 @@ const MapPreview = dynamic(() => import("@/components/map-preview").then((module
 const CHECK_IN_SECONDS = 6 * 60 * 60;
 const SHARE_LOCATION_UPDATE_MIN_INTERVAL_MS = 10_000;
 
-function currentLocation(): Promise<{ type: "Point"; coordinates: [number, number]; accuracy: number } | null> {
+type Fix = { type: "Point"; coordinates: [number, number]; accuracyM?: number };
+
+function currentLocation(): Promise<Fix | null> {
   return new Promise((resolve) => {
     if (!navigator.geolocation) return resolve(null);
     navigator.geolocation.getCurrentPosition(
-      (position) => resolve({ type: "Point", coordinates: [position.coords.longitude, position.coords.latitude], accuracy: position.coords.accuracy }),
+      (position) => resolve({ type: "Point", coordinates: [position.coords.longitude, position.coords.latitude], accuracyM: position.coords.accuracy }),
       () => resolve(null),
       { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 },
     );
   });
 }
+
+type Profile = { user: { displayName: string; safeWord?: SafeWordSetting }; contacts: ScriptContact[]; trips: Array<{ _id: string; travelDates?: { end?: string } }> };
 
 function formatCountdown(seconds: number) {
   const hours = String(Math.floor(seconds / 3600)).padStart(2, "0");
@@ -38,8 +46,9 @@ export default function EmergencyPage() {
   const [status, setStatus] = useState("Ready");
   const [checkinStatus, setCheckinStatus] = useState("");
   const [coords, setCoords] = useState<[number, number] | null>(null);
-  const [accuracy, setAccuracy] = useState<number | null>(null);
+  const [accuracyM, setAccuracyM] = useState<number | undefined>(undefined);
   const [locating, setLocating] = useState(true);
+  const [profile, setProfile] = useState<Profile | null>(null);
   const checkinAlertSent = useRef(false);
   const [selectedService, setSelectedService] = useState<SelectedEmergencyService | null>(null);
   const [selectedServiceId, setSelectedServiceId] = useState<string | null>(null);
@@ -51,12 +60,14 @@ export default function EmergencyPage() {
   const shareTokenRef = useRef<string | null>(null);
   const shareWatchId = useRef<number | null>(null);
   const lastShareUpdateAt = useRef(0);
+  const activeTrip = profile?.trips.find((trip) => trip.travelDates?.end && new Date(trip.travelDates.end) >= new Date());
+  const activeTripId = activeTrip?._id ?? profile?.trips[0]?._id;
 
   async function refreshLocation() {
     setLocating(true);
     const location = await currentLocation();
     setCoords(location ? location.coordinates : null);
-    setAccuracy(location ? location.accuracy : null);
+    setAccuracyM(location?.accuracyM);
     setLocating(false);
   }
 
@@ -77,6 +88,14 @@ export default function EmergencyPage() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    apiFetch<Profile>("/api/me")
+      .then((result) => { if (!cancelled) setProfile(result); })
+      .catch(() => { if (!cancelled) setProfile(null); });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
     if (seconds === null || seconds <= 0) return;
     const timer = window.setInterval(() => setSeconds((value) => value && value - 1), 1000);
     return () => window.clearInterval(timer);
@@ -91,7 +110,7 @@ export default function EmergencyPage() {
       try {
         const result = await apiFetch<{ contactsNotified: number; emailsSent: number; testMode?: boolean }>("/api/sos", {
           method: "POST",
-          body: JSON.stringify({ message: "Missed check-in: the 6-hour check-in timer expired without confirmation.", ...(location ? { location } : {}) }),
+          body: JSON.stringify({ message: "Missed check-in: the 6-hour check-in timer expired without confirmation.", trigger: "missed-checkin", ...(location ? { location: { type: "Point", coordinates: location.coordinates }, accuracyM: location.accuracyM } : {}) }),
         });
         const testNote = result.testMode ? " (test mode — SMTP isn't configured yet, so nothing reached a real inbox)" : "";
         setCheckinStatus(`Check-in window expired. Emailed ${result.emailsSent} of ${result.contactsNotified} emergency contact(s).${testNote}`);
@@ -107,7 +126,7 @@ export default function EmergencyPage() {
     try {
       const result = await apiFetch<{ contactsNotified: number; emailsSent: number; testMode?: boolean }>("/api/sos", {
         method: "POST",
-        body: JSON.stringify({ message: "Emergency SOS requested", ...(location ? { location } : {}) }),
+        body: JSON.stringify({ message: "Emergency SOS requested", trigger: "button", ...(location ? { location: { type: "Point", coordinates: location.coordinates }, accuracyM: location.accuracyM } : {}) }),
       });
       const testNote = result.testMode ? " (test mode — SMTP isn't configured yet, so nothing reached a real inbox)" : "";
       setStatus(result.contactsNotified === 0 ? "SOS recorded. Add an emergency contact so someone gets notified next time." : `SOS recorded. Emailed ${result.emailsSent} of ${result.contactsNotified} emergency contact(s).${testNote}`);
@@ -125,7 +144,7 @@ export default function EmergencyPage() {
     try {
       const result = await apiFetch<{ token: string; shareUrl: string; expiresAt: string; contactsNotified: number; emailsSent: number; testMode?: boolean }>("/api/location-share/start", {
         method: "POST",
-        body: JSON.stringify({ location: { type: location.type, coordinates: location.coordinates }, accuracy: location.accuracy, durationMinutes: CHECK_IN_SECONDS / 60 }),
+        body: JSON.stringify({ location: { type: location.type, coordinates: location.coordinates }, accuracy: location.accuracyM, durationMinutes: CHECK_IN_SECONDS / 60 }),
       });
       shareTokenRef.current = result.token;
       lastShareUpdateAt.current = Date.now();
@@ -228,17 +247,35 @@ export default function EmergencyPage() {
                 secondaryMarker={selectedService ? { point: coords, label: "You are here" } : undefined}
               />
             )}
-            {!locating && coords && accuracy !== null && (
+            {!locating && coords && accuracyM !== undefined && (
               <p className="services-status">
-                Reported accuracy: ~{accuracy >= 1000 ? `${(accuracy / 1000).toFixed(1)} km` : `${Math.round(accuracy)} m`}
-                {accuracy > 300 && " — this is a Wi-Fi/IP position estimate, not GPS, so it can land a neighborhood off (even when the browser reports a small accuracy number, the underlying Wi-Fi location database can be stale for this area). Open this page on a phone with GPS enabled for a precise fix, or check Windows Settings → Privacy & security → Location is on for your browser."}
+                Reported accuracy: ~{accuracyM >= 1000 ? `${(accuracyM / 1000).toFixed(1)} km` : `${Math.round(accuracyM)} m`}
+                {accuracyM > 300 && " — this is a Wi-Fi/IP position estimate, not GPS, so it can land a neighborhood off (even when the browser reports a small accuracy number, the underlying Wi-Fi location database can be stale for this area). Open this page on a phone with GPS enabled for a precise fix, or check Windows Settings → Privacy & security → Location is on for your browser."}
               </p>
             )}
             {!locating && !coords && <p>Location unavailable. Allow location access in your browser to see the map.</p>}
             <button className="text-button" onClick={() => void refreshLocation()}>Refresh location</button>
             {selectedService && <button className="text-button" onClick={clearSelectedService}>Show my location only</button>}
           </article>
-          {!locating && coords && <EmergencyServicesPanel center={coords} onSelect={selectService} selectedId={selectedServiceId} />}
+          {!locating && coords && (
+            <SosScriptPanel center={coords} accuracyM={accuracyM} contacts={profile?.contacts ?? []} callerName={profile?.user.displayName ?? "A Nirapod Jatra user"} />
+          )}
+          {!locating && !coords && (
+            <article className="sos-script-card">
+              <AlertTriangle size={28} />
+              <h2>SOS script</h2>
+              <p>Allow location access to auto-build a script with your exact coordinates and nearest landmark.</p>
+              <button className="text-button" onClick={() => void refreshLocation()}>Try location again</button>
+            </article>
+          )}
+          <VoiceSosArm
+            center={coords}
+            accuracyM={accuracyM}
+            contacts={profile?.contacts ?? []}
+            callerName={profile?.user.displayName ?? "A Nirapod Jatra user"}
+            initialSafeWord={profile?.user.safeWord ?? null}
+          />
+          {!locating && coords && <EmergencyServicesPanel center={coords} onSelect={selectService} selectedId={selectedServiceId} tripId={activeTripId} />}
         </section>
       </main>
     </RequireAuth>

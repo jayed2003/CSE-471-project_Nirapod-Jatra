@@ -76,6 +76,18 @@ export function getWeatherForecast(latitude: number, longitude: number) {
 	});
 }
 
+export type HourlyWeatherPoint = { time: string; temperature: number; weatherCode: number; description: string; precipitationProbability: number };
+
+type HourlyOpenMeteoResponse = { hourly: { time: string[]; temperature_2m: number[]; weathercode: number[]; precipitation_probability: number[] } };
+
+export function getHourlyWeatherForecast(latitude: number, longitude: number) {
+	return cached("hourly-weather", latitude, longitude, async (): Promise<HourlyWeatherPoint[]> => {
+		const url = `${METE_BASE}?latitude=${latitude}&longitude=${longitude}&hourly=temperature_2m,weathercode,precipitation_probability&forecast_days=2&timezone=auto`;
+		const data = await fetchJson<HourlyOpenMeteoResponse>(url);
+		return data.hourly.time.map((time, index) => ({ time, temperature: data.hourly.temperature_2m[index], weatherCode: data.hourly.weathercode[index], description: weatherDescription(data.hourly.weathercode[index]), precipitationProbability: data.hourly.precipitation_probability[index] }));
+	});
+}
+
 type AirResponse = { list: Array<{ dt: number; main: { aqi: number }; components: { pm2_5: number; pm10: number; o3: number; no2: number; so2: number; co: number; nh3: number } }> };
 function apiKey() { const key = process.env.OPENWEATHER_API_KEY; if (!key) throw new Error("OpenWeather API key is not configured"); return key; }
 export function normalizeAirQuality(item: AirResponse["list"][number]): AirQuality { return { aqi: item.main.aqi, label: aqiLabel(item.main.aqi), pm25: item.components.pm2_5, pm10: item.components.pm10, o3: item.components.o3, no2: item.components.no2, so2: item.components.so2, co: item.components.co, nh3: item.components.nh3, observedAt: new Date(item.dt * 1000).toISOString() }; }

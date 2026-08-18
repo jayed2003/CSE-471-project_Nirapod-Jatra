@@ -6,6 +6,9 @@ type SosEmailParams = {
   message?: string;
   locationUrl?: string;
   timestamp: Date;
+  /** Pre-composed SOS script (coordinates, landmark, situation). Preferred over the loose fields above. */
+  script?: string;
+  situation?: string;
 };
 
 type LocationShareEmailParams = {
@@ -71,11 +74,15 @@ async function sendPlainTextEmail(to: string, subject: string, lines: Array<stri
 }
 
 export async function sendSosAlertEmail(to: string, params: SosEmailParams): Promise<SosEmailResult> {
-  const { requesterName, requesterEmail, message, locationUrl, timestamp } = params;
-  return sendPlainTextEmail(to, `Emergency SOS alert from ${requesterName}`, [
+  const { requesterName, requesterEmail, message, locationUrl, timestamp, script, situation } = params;
+  const subject = situation ? `Emergency SOS (${situation}) from ${requesterName}` : `Emergency SOS alert from ${requesterName}`;
+  return sendPlainTextEmail(to, subject, [
     `${requesterName} has triggered an emergency SOS on Nirapod Jatra.`,
-    message ? `Message: ${message}` : null,
-    locationUrl ? `Last known location: ${locationUrl}` : null,
+    "",
+    // The generated script already carries coordinates, landmark and situation in the exact
+    // wording meant to be read to a 999 operator, so send that verbatim when we have it.
+    script ?? [message ? `Message: ${message}` : null, locationUrl ? `Last known location: ${locationUrl}` : null].filter(Boolean).join("\n"),
+    "",
     `Time: ${timestamp.toLocaleString()}`,
     requesterEmail ? `\nReply to this email to reach ${requesterName} directly at ${requesterEmail}.` : null,
   ], requesterEmail, "SOS email");
