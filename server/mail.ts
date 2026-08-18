@@ -5,6 +5,9 @@ type SosEmailParams = {
   message?: string;
   locationUrl?: string;
   timestamp: Date;
+  /** Pre-composed SOS script (coordinates, landmark, situation). Preferred over the loose fields above. */
+  script?: string;
+  situation?: string;
 };
 
 let transporter: Transporter | null | undefined;
@@ -27,18 +30,21 @@ export async function sendSosAlertEmail(to: string, params: SosEmailParams): Pro
     console.warn(`SOS email not sent to ${to}: SMTP is not configured (set SMTP_HOST/SMTP_USER/SMTP_PASS)`);
     return false;
   }
-  const { requesterName, message, locationUrl, timestamp } = params;
+  const { requesterName, message, locationUrl, timestamp, script, situation } = params;
   const lines = [
     `${requesterName} has triggered an emergency SOS on Nirapod Jatra.`,
-    message ? `Message: ${message}` : null,
-    locationUrl ? `Last known location: ${locationUrl}` : null,
+    "",
+    // The generated script already carries coordinates, landmark and situation in the exact
+    // wording meant to be read to a 999 operator, so send that verbatim when we have it.
+    script ?? [message ? `Message: ${message}` : null, locationUrl ? `Last known location: ${locationUrl}` : null].filter(Boolean).join("\n"),
+    "",
     `Time: ${timestamp.toLocaleString()}`,
-  ].filter((line): line is string => Boolean(line));
+  ].filter((line): line is string => line !== null);
   try {
     await client.sendMail({
       from: process.env.SMTP_FROM ?? process.env.SMTP_USER,
       to,
-      subject: `Emergency SOS alert from ${requesterName}`,
+      subject: situation ? `Emergency SOS (${situation}) from ${requesterName}` : `Emergency SOS alert from ${requesterName}`,
       text: lines.join("\n"),
     });
     return true;
