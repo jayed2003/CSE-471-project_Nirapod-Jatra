@@ -8,8 +8,10 @@ import { RequireAuth } from "@/components/require-auth";
 import { EmergencyServicesPanel, type SelectedEmergencyService } from "@/components/EmergencyServicesPanel";
 import { SosScriptPanel } from "@/components/sos-script-panel";
 import { VoiceSosArm } from "@/components/voice-sos-arm";
+import { PremiumGate } from "@/components/PremiumGate";
 import type { ScriptContact } from "@/components/sos-script-view";
 import type { SafeWordSetting } from "@/lib/safe-word";
+import type { Plan } from "@/lib/plan";
 
 const MapPreview = dynamic(() => import("@/components/map-preview").then((module) => module.MapPreview), {
   ssr: false,
@@ -32,7 +34,7 @@ function currentLocation(): Promise<Fix | null> {
   });
 }
 
-type Profile = { user: { displayName: string; safeWord?: SafeWordSetting }; contacts: ScriptContact[]; trips: Array<{ _id: string; travelDates?: { end?: string } }> };
+type Profile = { user: { displayName: string; plan?: Plan; safeWord?: SafeWordSetting }; contacts: ScriptContact[]; trips: Array<{ _id: string; travelDates?: { end?: string } }> };
 
 function formatCountdown(seconds: number) {
   const hours = String(Math.floor(seconds / 3600)).padStart(2, "0");
@@ -89,10 +91,14 @@ export default function EmergencyPage() {
 
   useEffect(() => {
     let cancelled = false;
-    apiFetch<Profile>("/api/me")
-      .then((result) => { if (!cancelled) setProfile(result); })
-      .catch(() => { if (!cancelled) setProfile(null); });
-    return () => { cancelled = true; };
+    function loadProfile() {
+      apiFetch<Profile>("/api/me")
+        .then((result) => { if (!cancelled) setProfile(result); })
+        .catch(() => { if (!cancelled) setProfile(null); });
+    }
+    loadProfile();
+    window.addEventListener("plan:changed", loadProfile);
+    return () => { cancelled = true; window.removeEventListener("plan:changed", loadProfile); };
   }, []);
 
   useEffect(() => {
@@ -219,21 +225,23 @@ export default function EmergencyPage() {
             {seconds !== null && <button className="text-button" onClick={cancelCheckin}>Cancel countdown</button>}
             {checkinStatus && <p>{checkinStatus}</p>}
           </article>
-          <article>
-            <Share2 size={28} />
-            <h2>Share live location</h2>
-            {sharing && <div className="monitoring"><span /> Live</div>}
-            <p>{shareStatus}</p>
-            {!sharing ? (
-              <button onClick={() => void startSharing()}>Start sharing (6 hours)</button>
-            ) : (
-              <>
-                <p className="services-status">Link: <a href={shareUrl} target="_blank" rel="noreferrer">{shareUrl}</a></p>
-                {shareExpiresAt && <p className="services-status">Live until {shareExpiresAt.toLocaleString()}</p>}
-                <button className="text-button" onClick={() => void stopSharing()}>Stop sharing</button>
-              </>
-            )}
-          </article>
+          <PremiumGate plan={profile?.user.plan} feature="Live location sharing">
+            <article>
+              <Share2 size={28} />
+              <h2>Share live location</h2>
+              {sharing && <div className="monitoring"><span /> Live</div>}
+              <p>{shareStatus}</p>
+              {!sharing ? (
+                <button onClick={() => void startSharing()}>Start sharing (6 hours)</button>
+              ) : (
+                <>
+                  <p className="services-status">Link: <a href={shareUrl} target="_blank" rel="noreferrer">{shareUrl}</a></p>
+                  {shareExpiresAt && <p className="services-status">Live until {shareExpiresAt.toLocaleString()}</p>}
+                  <button className="text-button" onClick={() => void stopSharing()}>Stop sharing</button>
+                </>
+              )}
+            </article>
+          </PremiumGate>
           <article className="emergency-map-card" ref={mapCardRef}>
             <MapPin size={28} />
             <h2>Nearby now</h2>
@@ -257,24 +265,28 @@ export default function EmergencyPage() {
             <button className="text-button" onClick={() => void refreshLocation()}>Refresh location</button>
             {selectedService && <button className="text-button" onClick={clearSelectedService}>Show my location only</button>}
           </article>
-          {!locating && coords && (
-            <SosScriptPanel center={coords} accuracyM={accuracyM} contacts={profile?.contacts ?? []} callerName={profile?.user.displayName ?? "A Nirapod Jatra user"} />
-          )}
-          {!locating && !coords && (
-            <article className="sos-script-card">
-              <AlertTriangle size={28} />
-              <h2>SOS script</h2>
-              <p>Allow location access to auto-build a script with your exact coordinates and nearest landmark.</p>
-              <button className="text-button" onClick={() => void refreshLocation()}>Try location again</button>
-            </article>
-          )}
-          <VoiceSosArm
-            center={coords}
-            accuracyM={accuracyM}
-            contacts={profile?.contacts ?? []}
-            callerName={profile?.user.displayName ?? "A Nirapod Jatra user"}
-            initialSafeWord={profile?.user.safeWord ?? null}
-          />
+          <PremiumGate plan={profile?.user.plan} feature="SOS script generator">
+            {!locating && coords && (
+              <SosScriptPanel center={coords} accuracyM={accuracyM} contacts={profile?.contacts ?? []} callerName={profile?.user.displayName ?? "A Nirapod Jatra user"} />
+            )}
+            {!locating && !coords && (
+              <article className="sos-script-card">
+                <AlertTriangle size={28} />
+                <h2>SOS script</h2>
+                <p>Allow location access to auto-build a script with your exact coordinates and nearest landmark.</p>
+                <button className="text-button" onClick={() => void refreshLocation()}>Try location again</button>
+              </article>
+            )}
+          </PremiumGate>
+          <PremiumGate plan={profile?.user.plan} feature="Voice safe-word SOS">
+            <VoiceSosArm
+              center={coords}
+              accuracyM={accuracyM}
+              contacts={profile?.contacts ?? []}
+              callerName={profile?.user.displayName ?? "A Nirapod Jatra user"}
+              initialSafeWord={profile?.user.safeWord ?? null}
+            />
+          </PremiumGate>
           {!locating && coords && <EmergencyServicesPanel center={coords} onSelect={selectService} selectedId={selectedServiceId} tripId={activeTripId} />}
         </section>
       </main>
