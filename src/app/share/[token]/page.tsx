@@ -6,10 +6,13 @@ import { useParams } from "next/navigation";
 import { Share2 } from "lucide-react";
 import { apiFetch } from "@/lib/api-client";
 
-const MapPreview = dynamic(() => import("@/components/map-preview").then((module) => module.MapPreview), {
-  ssr: false,
-  loading: () => <div className="map-loading">Loading map...</div>,
-});
+const MapPreview = dynamic(
+  () => import("@/components/map-preview").then((module) => module.MapPreview),
+  {
+    ssr: false,
+    loading: () => <div className="map-loading">Loading map...</div>,
+  },
+);
 
 type SharePayload = {
   active: boolean;
@@ -50,13 +53,22 @@ export default function LocationSharePage() {
         activeRef.current = result.active;
       } catch (reason) {
         if (cancelled) return;
-        setError(reason instanceof Error ? reason.message : "This live location link is no longer available.");
+        setError(
+          reason instanceof Error
+            ? reason.message
+            : "This live location link is no longer available.",
+        );
         activeRef.current = false;
       }
     }
     void poll();
-    const interval = window.setInterval(() => { if (activeRef.current) void poll(); }, POLL_MS);
-    return () => { cancelled = true; window.clearInterval(interval); };
+    const interval = window.setInterval(() => {
+      if (activeRef.current) void poll();
+    }, POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
   }, [token]);
 
   useEffect(() => {
@@ -68,11 +80,22 @@ export default function LocationSharePage() {
     <main className="subpage share-page">
       <header className="subpage-header">
         <p className="eyebrow">Live location</p>
-        <h1><Share2 size={26} style={{ verticalAlign: "middle", marginRight: 10 }} />{data ? `${data.requesterName}'s location` : "Live location"}</h1>
+        <h1>
+          <Share2 size={26} style={{ verticalAlign: "middle", marginRight: 10 }} />
+          {data ? `${data.requesterName}'s location` : "Live location"}
+        </h1>
         {data && (
           <>
-            {data.active && <div className="monitoring"><span /> Live</div>}
-            <p>{data.active ? `Updated ${formatAgo(now - new Date(data.lastUpdatedAt ?? data.expiresAt).getTime())} · expires ${new Date(data.expiresAt).toLocaleString()}` : "This live location share has ended."}</p>
+            {data.active && (
+              <div className="monitoring">
+                <span /> Live
+              </div>
+            )}
+            <p>
+              {data.active
+                ? `Updated ${formatAgo(now - new Date(data.lastUpdatedAt ?? data.expiresAt).getTime())} · expires ${new Date(data.expiresAt).toLocaleString()}`
+                : "This live location share has ended."}
+            </p>
           </>
         )}
       </header>
@@ -83,7 +106,9 @@ export default function LocationSharePage() {
           <MapPreview center={data.location.coordinates} label={data.requesterName} zoom={15} />
         </article>
       )}
-      {!error && data && !data.location && <p className="form-hint">No location has been received yet.</p>}
+      {!error && data && !data.location && (
+        <p className="form-hint">No location has been received yet.</p>
+      )}
     </main>
   );
 }

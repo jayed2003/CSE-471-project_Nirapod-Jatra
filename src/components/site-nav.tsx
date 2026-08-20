@@ -4,6 +4,82 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { apiFetch, getToken } from "@/lib/api-client";
 
-type RiskAlert = { tripId: string; destination: string; factor: string; previous: string; current: string };
+type RiskAlert = {
+  tripId: string;
+  destination: string;
+  factor: string;
+  previous: string;
+  current: string;
+};
 
-export function SiteNav() { const path = usePathname(); const [online, setOnline] = useState(true); const [authed, setAuthed] = useState(false); const [alerts, setAlerts] = useState<RiskAlert[]>([]); useEffect(() => { const sync = () => setOnline(navigator.onLine); sync(); window.addEventListener("online", sync); window.addEventListener("offline", sync); return () => { window.removeEventListener("online", sync); window.removeEventListener("offline", sync); }; }, []); useEffect(() => { const sync = () => setAuthed(Boolean(getToken())); sync(); }, [path]); useEffect(() => { const syncAlerts = () => { if (!getToken()) { setAlerts([]); return; } apiFetch<{ alerts: RiskAlert[] }>("/api/risk-alerts").then((data) => setAlerts(data.alerts)).catch(() => setAlerts([])); }; syncAlerts(); const timer = window.setInterval(syncAlerts, 30_000); window.addEventListener("risk-alert:ack", syncAlerts); return () => { window.clearInterval(timer); window.removeEventListener("risk-alert:ack", syncAlerts); }; }, [path]); const links: Array<[string, string]> = [["/", "Home"]]; if (authed) links.push(["/planner", "Planner"], ["/trips", "Trips"], ["/readiness", "Readiness"], ["/emergency", "Emergency"]); links.push(["/account", authed ? "Account" : "Sign in"]); return <><div className="risk-alert-banner" role="status" aria-live="polite">{alerts.map((alert) => <Link key={alert.tripId} href="/trips">{alert.factor} changed to {alert.current}</Link>)}</div><nav className={`site-nav ${alerts.length ? "with-banner" : ""}`} aria-label="Primary navigation">{links.map(([href, label]) => <Link key={href} href={href} className={path === href ? "active" : ""}>{label}</Link>)}</nav><div className={`network-status ${online ? "online" : "offline"}`} role="status">{online ? "Online" : "Offline · cached data active"}</div></>; }
+export function SiteNav() {
+  const path = usePathname();
+  const [online, setOnline] = useState(true);
+  const [authed, setAuthed] = useState(false);
+  const [alerts, setAlerts] = useState<RiskAlert[]>([]);
+  useEffect(() => {
+    const sync = () => setOnline(navigator.onLine);
+    sync();
+    window.addEventListener("online", sync);
+    window.addEventListener("offline", sync);
+    return () => {
+      window.removeEventListener("online", sync);
+      window.removeEventListener("offline", sync);
+    };
+  }, []);
+  useEffect(() => {
+    const sync = () => setAuthed(Boolean(getToken()));
+    sync();
+  }, [path]);
+  useEffect(() => {
+    const syncAlerts = () => {
+      if (!getToken()) {
+        setAlerts([]);
+        return;
+      }
+      apiFetch<{ alerts: RiskAlert[] }>("/api/risk-alerts")
+        .then((data) => setAlerts(data.alerts))
+        .catch(() => setAlerts([]));
+    };
+    syncAlerts();
+    const timer = window.setInterval(syncAlerts, 30_000);
+    window.addEventListener("risk-alert:ack", syncAlerts);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("risk-alert:ack", syncAlerts);
+    };
+  }, [path]);
+  const links: Array<[string, string]> = [["/", "Home"]];
+  if (authed)
+    links.push(
+      ["/planner", "Planner"],
+      ["/trips", "Trips"],
+      ["/readiness", "Readiness"],
+      ["/emergency", "Emergency"],
+    );
+  links.push(["/account", authed ? "Account" : "Sign in"]);
+  return (
+    <>
+      <div className="risk-alert-banner" role="status" aria-live="polite">
+        {alerts.map((alert) => (
+          <Link key={alert.tripId} href="/trips">
+            {alert.factor} changed to {alert.current}
+          </Link>
+        ))}
+      </div>
+      <nav
+        className={`site-nav ${alerts.length ? "with-banner" : ""}`}
+        aria-label="Primary navigation"
+      >
+        {links.map(([href, label]) => (
+          <Link key={href} href={href} className={path === href ? "active" : ""}>
+            {label}
+          </Link>
+        ))}
+      </nav>
+      <div className={`network-status ${online ? "online" : "offline"}`} role="status">
+        {online ? "Online" : "Offline · cached data active"}
+      </div>
+    </>
+  );
+}

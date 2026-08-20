@@ -4,7 +4,14 @@ export type CachedZonePack = {
   zoneName: string;
   region: string;
   personalContacts: Array<{ name: string; phone: string; email: string; priority: number }>;
-  nearbyServices: Array<{ id: string; name: string; category: string; point: [number, number]; distanceMeters: number; phones: string[] }>;
+  nearbyServices: Array<{
+    id: string;
+    name: string;
+    category: string;
+    point: [number, number];
+    distanceMeters: number;
+    phones: string[];
+  }>;
   degraded: boolean;
   tiles: string[];
   cachedAt: string;

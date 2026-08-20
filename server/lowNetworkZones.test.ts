@@ -1,8 +1,27 @@
 import { describe, expect, it, vi } from "vitest";
-import { LOW_NETWORK_ZONES, zonesAlongRoute, offlineTilesForZone, emergencyBundleForZone } from "./lowNetworkZones.js";
+import {
+  LOW_NETWORK_ZONES,
+  zonesAlongRoute,
+  offlineTilesForZone,
+  emergencyBundleForZone,
+} from "./lowNetworkZones.js";
 
-const TANGUAR_ROUTE = { type: "LineString", coordinates: [[91.05, 25.03], [91.09, 25.09], [91.12, 25.13]] };
-const DHAKA_ROUTE = { type: "LineString", coordinates: [[90.2, 23.7], [90.4, 23.85], [90.6, 24.0]] };
+const TANGUAR_ROUTE = {
+  type: "LineString",
+  coordinates: [
+    [91.05, 25.03],
+    [91.09, 25.09],
+    [91.12, 25.13],
+  ],
+};
+const DHAKA_ROUTE = {
+  type: "LineString",
+  coordinates: [
+    [90.2, 23.7],
+    [90.4, 23.85],
+    [90.6, 24.0],
+  ],
+};
 
 describe("zonesAlongRoute", () => {
   it("detects a route passing through a curated zone", () => {
@@ -29,7 +48,11 @@ describe("offlineTilesForZone", () => {
   it("computes a bounded tile list for a zone", () => {
     const tiles = offlineTilesForZone(LOW_NETWORK_ZONES[0]);
     expect(tiles.tileCount).toBeGreaterThan(0);
-    expect(tiles.tiles.every((tile) => /^https:\/\/tile\.openstreetmap\.org\/\d+\/\d+\/\d+\.png$/.test(tile))).toBe(true);
+    expect(
+      tiles.tiles.every((tile) =>
+        /^https:\/\/tile\.openstreetmap\.org\/\d+\/\d+\/\d+\.png$/.test(tile),
+      ),
+    ).toBe(true);
   });
 
   it("respects the maxTiles bound", () => {
@@ -53,7 +76,14 @@ describe("emergencyBundleForZone", () => {
 
   it("dedupes services shared across representative points", async () => {
     const { nearbyEmergencyServices } = await import("./warnings.js");
-    const shared = { id: "hospital-1", name: "Shared Hospital", category: "hospital" as const, point: [91.09, 25.08] as [number, number], distanceMeters: 100, phones: [] };
+    const shared = {
+      id: "hospital-1",
+      name: "Shared Hospital",
+      category: "hospital" as const,
+      point: [91.09, 25.08] as [number, number],
+      distanceMeters: 100,
+      phones: [],
+    };
     vi.mocked(nearbyEmergencyServices).mockResolvedValue({ services: [shared], degraded: false });
     const bundle = await emergencyBundleForZone(LOW_NETWORK_ZONES[0]);
     const ids = bundle.services.map((service) => service.id);

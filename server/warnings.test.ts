@@ -1,9 +1,40 @@
 import { describe, expect, it, vi } from "vitest";
-import { fetchBmdAlerts, haversineKm, offlineTilesForRoute, pointInPolygon, warningsNearRoute, type BmdAlert, type FloodWarning } from "./warnings.js";
+import {
+  fetchBmdAlerts,
+  haversineKm,
+  offlineTilesForRoute,
+  pointInPolygon,
+  warningsNearRoute,
+  type BmdAlert,
+  type FloodWarning,
+} from "./warnings.js";
 
-const DHAKA_POLYGON: Array<[number, number]> = [[90.0, 23.5], [90.8, 23.5], [90.8, 24.1], [90.0, 24.1], [90.0, 23.5]];
-const ROUTE = { type: "LineString", coordinates: [[90.2, 23.7], [90.4, 23.85], [90.6, 24.0]] };
-const BMD_ALERT: BmdAlert = { provider: "bmd", id: "BMD-2026-001", event: "Rain", severity: "Severe", headline: "Heavy Rainfall Warning - Dhaka", area: "Dhaka", effective: "2026-08-11T06:00:00+06:00", expires: "2026-08-12T06:00:00+06:00", polygons: [DHAKA_POLYGON] };
+const DHAKA_POLYGON: Array<[number, number]> = [
+  [90.0, 23.5],
+  [90.8, 23.5],
+  [90.8, 24.1],
+  [90.0, 24.1],
+  [90.0, 23.5],
+];
+const ROUTE = {
+  type: "LineString",
+  coordinates: [
+    [90.2, 23.7],
+    [90.4, 23.85],
+    [90.6, 24.0],
+  ],
+};
+const BMD_ALERT: BmdAlert = {
+  provider: "bmd",
+  id: "BMD-2026-001",
+  event: "Rain",
+  severity: "Severe",
+  headline: "Heavy Rainfall Warning - Dhaka",
+  area: "Dhaka",
+  effective: "2026-08-11T06:00:00+06:00",
+  expires: "2026-08-12T06:00:00+06:00",
+  polygons: [DHAKA_POLYGON],
+};
 
 describe("pointInPolygon", () => {
   it("returns true for a point inside the polygon and false outside", () => {
@@ -28,11 +59,37 @@ describe("warningsNearRoute", () => {
   });
 
   it("flags a flooded BWDB station within the corridor but ignores far stations", () => {
-    const near: FloodWarning = { provider: "bwdb", stationId: "SW45", station: "Bhagyakul", district: "Munshiganj", point: [90.5, 23.85], dangerLevelM: 5.5, levelM: 6.3, status: "Warning", headline: "Bhagyakul river gauge is above the danger level (6.30 m).", source: "demo" };
-    const far: FloodWarning = { provider: "bwdb", stationId: "SW1", station: "Kurigram", district: "Kurigram", point: [89.65, 25.8], dangerLevelM: 25.5, levelM: 26.3, status: "Warning", headline: "Kurigram river gauge is above the danger level.", source: "demo" };
+    const near: FloodWarning = {
+      provider: "bwdb",
+      stationId: "SW45",
+      station: "Bhagyakul",
+      district: "Munshiganj",
+      point: [90.5, 23.85],
+      dangerLevelM: 5.5,
+      levelM: 6.3,
+      status: "Warning",
+      headline: "Bhagyakul river gauge is above the danger level (6.30 m).",
+      source: "demo",
+    };
+    const far: FloodWarning = {
+      provider: "bwdb",
+      stationId: "SW1",
+      station: "Kurigram",
+      district: "Kurigram",
+      point: [89.65, 25.8],
+      dangerLevelM: 25.5,
+      levelM: 26.3,
+      status: "Warning",
+      headline: "Kurigram river gauge is above the danger level.",
+      source: "demo",
+    };
     const warnings = warningsNearRoute(ROUTE, [], [near, far]);
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toMatchObject({ provider: "bwdb", status: "Warning", area: "Bhagyakul, Munshiganj" });
+    expect(warnings[0]).toMatchObject({
+      provider: "bwdb",
+      status: "Warning",
+      area: "Bhagyakul, Munshiganj",
+    });
   });
 
   it("returns an empty list when nothing affects the route", () => {
@@ -44,7 +101,11 @@ describe("offlineTilesForRoute", () => {
   it("computes a bounded tile list for the route corridor", () => {
     const tiles = offlineTilesForRoute(ROUTE);
     expect(tiles.tileCount).toBeGreaterThan(0);
-    expect(tiles.tiles.every((tile) => /^https:\/\/tile\.openstreetmap\.org\/13\/\d+\/\d+\.png$/.test(tile))).toBe(true);
+    expect(
+      tiles.tiles.every((tile) =>
+        /^https:\/\/tile\.openstreetmap\.org\/13\/\d+\/\d+\.png$/.test(tile),
+      ),
+    ).toBe(true);
   });
 
   it("returns an empty list without route geometry", () => {

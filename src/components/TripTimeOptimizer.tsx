@@ -20,7 +20,12 @@ type DepartureRecommendation = {
   degraded: boolean;
 };
 
-const BADGE_LEVEL: Record<DepartureOption["riskLevel"], "safe" | "caution" | "alert"> = { Low: "safe", Moderate: "caution", High: "alert", Severe: "alert" };
+const BADGE_LEVEL: Record<DepartureOption["riskLevel"], "safe" | "caution" | "alert"> = {
+  Low: "safe",
+  Moderate: "caution",
+  High: "alert",
+  Severe: "alert",
+};
 
 function formatTime(iso: string) {
   return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -35,17 +40,35 @@ export function TripTimeOptimizer({ lat, lon }: { lat: number; lon: number }) {
     setStatus("loading");
     setData(null);
     fetch(`/api/trip-time-optimization?destLat=${lat}&destLng=${lon}`)
-      .then((response) => { if (!response.ok) throw new Error(); return response.json() as Promise<DepartureRecommendation>; })
-      .then((result) => { if (!cancelled) { setData(result); setStatus("ready"); } })
-      .catch(() => { if (!cancelled) setStatus("error"); });
-    return () => { cancelled = true; };
+      .then((response) => {
+        if (!response.ok) throw new Error();
+        return response.json() as Promise<DepartureRecommendation>;
+      })
+      .then((result) => {
+        if (!cancelled) {
+          setData(result);
+          setStatus("ready");
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setStatus("error");
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [lat, lon]);
 
   return (
     <section className="trip-departure" aria-label="Recommended departure">
-      <h3><Clock3 size={16} /> Best time to travel</h3>
-      {status === "loading" && <p className="env-loading">Finding the safest departure window...</p>}
-      {status === "error" && <p className="env-error">Departure-time forecast unavailable right now.</p>}
+      <h3>
+        <Clock3 size={16} /> Best time to travel
+      </h3>
+      {status === "loading" && (
+        <p className="env-loading">Finding the safest departure window...</p>
+      )}
+      {status === "error" && (
+        <p className="env-error">Departure-time forecast unavailable right now.</p>
+      )}
       {status === "ready" && data && (
         <>
           <p className="trip-departure-headline">{data.explanation}</p>
@@ -58,9 +81,15 @@ export function TripTimeOptimizer({ lat, lon }: { lat: number; lon: number }) {
               </div>
               {data.options.map((option) => (
                 <div key={option.departureTime} className="trip-time-row" role="row">
-                  <span role="cell"><time dateTime={option.departureTime}>{formatTime(option.departureTime)}</time></span>
-                  <span role="cell" className={`badge ${BADGE_LEVEL[option.riskLevel]}`}>{option.riskLevel}</span>
-                  <span role="cell" className={`badge ${BADGE_LEVEL[option.riskLevel]}`}>{option.recommendation}</span>
+                  <span role="cell">
+                    <time dateTime={option.departureTime}>{formatTime(option.departureTime)}</time>
+                  </span>
+                  <span role="cell" className={`badge ${BADGE_LEVEL[option.riskLevel]}`}>
+                    {option.riskLevel}
+                  </span>
+                  <span role="cell" className={`badge ${BADGE_LEVEL[option.riskLevel]}`}>
+                    {option.recommendation}
+                  </span>
                 </div>
               ))}
             </div>

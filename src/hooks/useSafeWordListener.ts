@@ -5,8 +5,15 @@ import { matchSafeWord, type SafeWordSensitivity } from "@/lib/safe-word";
 
 // The Web Speech API is not in TypeScript's DOM lib, so declare the slice we use.
 type SpeechRecognitionAlternative = { transcript: string; confidence: number };
-type SpeechRecognitionResult = { readonly length: number; isFinal: boolean; [index: number]: SpeechRecognitionAlternative };
-type SpeechRecognitionEvent = { resultIndex: number; results: { readonly length: number; [index: number]: SpeechRecognitionResult } };
+type SpeechRecognitionResult = {
+  readonly length: number;
+  isFinal: boolean;
+  [index: number]: SpeechRecognitionAlternative;
+};
+type SpeechRecognitionEvent = {
+  resultIndex: number;
+  results: { readonly length: number; [index: number]: SpeechRecognitionResult };
+};
 type SpeechRecognitionErrorEvent = { error: string };
 type SpeechRecognitionInstance = {
   lang: string;
@@ -25,7 +32,10 @@ type SpeechRecognitionConstructor = new () => SpeechRecognitionInstance;
 
 function recognitionConstructor(): SpeechRecognitionConstructor | null {
   if (typeof window === "undefined") return null;
-  const scope = window as unknown as { SpeechRecognition?: SpeechRecognitionConstructor; webkitSpeechRecognition?: SpeechRecognitionConstructor };
+  const scope = window as unknown as {
+    SpeechRecognition?: SpeechRecognitionConstructor;
+    webkitSpeechRecognition?: SpeechRecognitionConstructor;
+  };
   return scope.SpeechRecognition ?? scope.webkitSpeechRecognition ?? null;
 }
 
@@ -59,7 +69,13 @@ export type SafeWordListenerState = {
  * watchdog restart below is not defensive polish — without it the feature dies silently after
  * the first minute and the user has no way to tell.
  */
-export function useSafeWordListener({ enabled, phrase, romanized, sensitivity, onMatch }: SafeWordListenerOptions): SafeWordListenerState {
+export function useSafeWordListener({
+  enabled,
+  phrase,
+  romanized,
+  sensitivity,
+  onMatch,
+}: SafeWordListenerOptions): SafeWordListenerState {
   const [supported] = useState(() => isSafeWordSupported());
   const [sessionLive, setSessionLive] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -71,10 +87,15 @@ export function useSafeWordListener({ enabled, phrase, romanized, sensitivity, o
   const restartTimerRef = useRef<number | null>(null);
   const lastTriggerRef = useRef(0);
   const onMatchRef = useRef(onMatch);
-  useEffect(() => { onMatchRef.current = onMatch; }, [onMatch]);
+  useEffect(() => {
+    onMatchRef.current = onMatch;
+  }, [onMatch]);
 
   const clearRestartTimer = useCallback(() => {
-    if (restartTimerRef.current !== null) { window.clearTimeout(restartTimerRef.current); restartTimerRef.current = null; }
+    if (restartTimerRef.current !== null) {
+      window.clearTimeout(restartTimerRef.current);
+      restartTimerRef.current = null;
+    }
   }, []);
 
   useEffect(() => {
@@ -100,7 +121,11 @@ export function useSafeWordListener({ enabled, phrase, romanized, sensitivity, o
 
     const start = () => {
       if (!activeRef.current) return;
-      try { recognition.start(); } catch { /* already started — the onend handler will retry */ }
+      try {
+        recognition.start();
+      } catch {
+        /* already started — the onend handler will retry */
+      }
     };
 
     const scheduleRestart = () => {
@@ -116,14 +141,19 @@ export function useSafeWordListener({ enabled, phrase, romanized, sensitivity, o
       restartTimerRef.current = window.setTimeout(start, delay);
     };
 
-    recognition.onstart = () => { restartsRef.current = 0; setSessionLive(true); setError(null); };
+    recognition.onstart = () => {
+      restartsRef.current = 0;
+      setSessionLive(true);
+      setError(null);
+    };
 
     recognition.onresult = (event) => {
       let transcript = "";
       for (let index = event.resultIndex; index < event.results.length; index += 1) {
         const result = event.results[index];
         // Check every alternative: the top-ranked bn-BD transcript is often not the closest one.
-        for (let alternative = 0; alternative < result.length; alternative += 1) transcript += ` ${result[alternative].transcript}`;
+        for (let alternative = 0; alternative < result.length; alternative += 1)
+          transcript += ` ${result[alternative].transcript}`;
       }
       transcript = transcript.trim();
       if (!transcript) return;
@@ -149,10 +179,14 @@ export function useSafeWordListener({ enabled, phrase, romanized, sensitivity, o
         return;
       }
       // "no-speech", "network" and "aborted" are routine; onend fires next and restarts us.
-      if (event.error === "network") setError("Speech recognition needs an internet connection. Retrying...");
+      if (event.error === "network")
+        setError("Speech recognition needs an internet connection. Retrying...");
     };
 
-    recognition.onend = () => { setSessionLive(false); scheduleRestart(); };
+    recognition.onend = () => {
+      setSessionLive(false);
+      scheduleRestart();
+    };
 
     start();
 
@@ -163,7 +197,11 @@ export function useSafeWordListener({ enabled, phrase, romanized, sensitivity, o
       recognition.onerror = null;
       recognition.onend = null;
       recognition.onstart = null;
-      try { recognition.abort(); } catch { /* nothing to abort */ }
+      try {
+        recognition.abort();
+      } catch {
+        /* nothing to abort */
+      }
       recognitionRef.current = null;
       setSessionLive(false);
     };

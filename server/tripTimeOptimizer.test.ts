@@ -19,23 +19,42 @@ const HOURLY_WEATHER: HourlyWeatherPoint[] = Array.from({ length: 48 }, (_, inde
 }));
 
 function aqiPoint(hour: number, aqi: number): AirQualityForecastPoint {
-  return { aqi, label: "test", pm25: 10, pm10: 20, o3: 30, observedAt: new Date(Date.UTC(2026, 7, 17, hour)).toISOString() };
+  return {
+    aqi,
+    label: "test",
+    pm25: 10,
+    pm10: 20,
+    o3: 30,
+    observedAt: new Date(Date.UTC(2026, 7, 17, hour)).toISOString(),
+  };
 }
 
 describe("recommendDepartureTime", () => {
-  beforeEach(() => { vi.unstubAllEnvs(); });
+  beforeEach(() => {
+    vi.unstubAllEnvs();
+  });
 
   it("ranks a contiguous low-AQI run as the best window", async () => {
     const { getHourlyWeatherForecast, getAirQualityForecast } = await import("./weather.js");
     vi.mocked(getHourlyWeatherForecast).mockResolvedValue(HOURLY_WEATHER);
-    vi.mocked(getAirQualityForecast).mockResolvedValue([aqiPoint(6, 2), aqiPoint(9, 1), aqiPoint(12, 4), aqiPoint(15, 5), aqiPoint(18, 3), aqiPoint(21, 2)]);
+    vi.mocked(getAirQualityForecast).mockResolvedValue([
+      aqiPoint(6, 2),
+      aqiPoint(9, 1),
+      aqiPoint(12, 4),
+      aqiPoint(15, 5),
+      aqiPoint(18, 3),
+      aqiPoint(21, 2),
+    ]);
     const { recommendDepartureTime } = await import("./tripTimeOptimizer.js");
     const result = await recommendDepartureTime([90.4125, 23.8103]);
     expect(result.degraded).toBe(false);
     expect(result.options).toHaveLength(6);
     expect(result.options[0].riskLevel).toBe("Low");
     expect(result.options[2].riskLevel).toBe("High");
-    expect(result.bestWindow).toEqual({ start: aqiPoint(6, 2).observedAt, end: aqiPoint(9, 1).observedAt });
+    expect(result.bestWindow).toEqual({
+      start: aqiPoint(6, 2).observedAt,
+      end: aqiPoint(9, 1).observedAt,
+    });
     expect(result.recommendedDeparture).toBe(aqiPoint(6, 2).observedAt);
     expect(result.explanation).toContain("Recommended departure");
   });
@@ -45,7 +64,18 @@ describe("recommendDepartureTime", () => {
     const { fetchFloodWarnings } = await import("./warnings.js");
     vi.mocked(getHourlyWeatherForecast).mockResolvedValue(HOURLY_WEATHER);
     vi.mocked(getAirQualityForecast).mockResolvedValue([aqiPoint(6, 1), aqiPoint(9, 1)]);
-    vi.mocked(fetchFloodWarnings).mockResolvedValue([{ provider: "bwdb", stationId: "SW1", station: "Test", district: "Test", point: [90.4125, 23.8103], status: "Warning", headline: "test", source: "demo" }]);
+    vi.mocked(fetchFloodWarnings).mockResolvedValue([
+      {
+        provider: "bwdb",
+        stationId: "SW1",
+        station: "Test",
+        district: "Test",
+        point: [90.4125, 23.8103],
+        status: "Warning",
+        headline: "test",
+        source: "demo",
+      },
+    ]);
     const { recommendDepartureTime } = await import("./tripTimeOptimizer.js");
     const result = await recommendDepartureTime([90.4125, 23.8103]);
     expect(result.options.every((option) => option.riskLevel === "Severe")).toBe(true);
@@ -55,7 +85,11 @@ describe("recommendDepartureTime", () => {
     vi.stubEnv("DEMO_TRIP_TIME_AQI", "1,5");
     const { getHourlyWeatherForecast, getAirQualityForecast } = await import("./weather.js");
     vi.mocked(getHourlyWeatherForecast).mockResolvedValue(HOURLY_WEATHER);
-    vi.mocked(getAirQualityForecast).mockResolvedValue([aqiPoint(6, 3), aqiPoint(9, 3), aqiPoint(12, 3)]);
+    vi.mocked(getAirQualityForecast).mockResolvedValue([
+      aqiPoint(6, 3),
+      aqiPoint(9, 3),
+      aqiPoint(12, 3),
+    ]);
     const { recommendDepartureTime } = await import("./tripTimeOptimizer.js");
     const result = await recommendDepartureTime([90.4125, 23.8103]);
     expect(result.options.map((option) => option.aqi)).toEqual([1, 5, 1]);
