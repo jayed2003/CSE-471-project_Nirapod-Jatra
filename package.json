@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "dev:server": "tsx watch server/index.ts",
+    "seed": "tsx server/seed.ts",
     "dev:all": "concurrently \"npm run dev\" \"npm run dev:server\"",
     "build": "next build",
     "start": "next start",

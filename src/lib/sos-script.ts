@@ -30,21 +30,11 @@ export type SosScript = {
 
 const KIT_KEY = "sos-kit";
 const SITUATIONS_KEY = "sos-situations";
+const SUGGESTIONS_KEY = "safe-word-suggestions";
 // Reuse a cached landmark only while the user is plausibly still beside it.
 const KIT_REUSE_METERS = 600;
 
 type SosKit = { point: [number, number]; callerName: string; address: SosScript["facts"]["address"]; landmark: Landmark | null; savedAt: number };
-
-export const FALLBACK_SITUATIONS: SituationOption[] = [
-  { type: "medical", bn: "চিকিৎসা জরুরি অবস্থা", en: "medical emergency", service: "ambulance", serviceBn: "অ্যাম্বুলেন্স" },
-  { type: "accident", bn: "সড়ক দুর্ঘটনা", en: "road accident", service: "ambulance", serviceBn: "অ্যাম্বুলেন্স" },
-  { type: "fire", bn: "আগুন লেগেছে", en: "fire", service: "fire", serviceBn: "ফায়ার সার্ভিস" },
-  { type: "flood", bn: "বন্যার পানিতে আটকে আছি", en: "trapped by floodwater", service: "fire", serviceBn: "ফায়ার সার্ভিস" },
-  { type: "crime", bn: "আমি আক্রমণের শিকার হয়েছি", en: "assault or crime in progress", service: "police", serviceBn: "পুলিশ" },
-  { type: "harassment", bn: "আমি হয়রানির শিকার হচ্ছি এবং নিরাপদ বোধ করছি না", en: "harassment, I do not feel safe", service: "police", serviceBn: "পুলিশ" },
-  { type: "stranded", bn: "আমি আটকে পড়েছি, নিরাপদ জায়গায় যেতে পারছি না", en: "stranded and unable to reach safety", service: "any", serviceBn: "জরুরি সেবা" },
-  { type: "unknown", bn: "জরুরি অবস্থা", en: "emergency", service: "any", serviceBn: "জরুরি সেবা" },
-];
 
 const BN_DIGITS = "০১২৩৪৫৬৭৮৯";
 const BN_DIGIT_WORDS = ["শূন্য", "এক", "দুই", "তিন", "চার", "পাঁচ", "ছয়", "সাত", "আট", "নয়"];
@@ -59,13 +49,28 @@ function haversineMeters(a: [number, number], b: [number, number]) {
   return 6_371_000 * 2 * Math.atan2(Math.sqrt(sine), Math.sqrt(1 - sine));
 }
 
+/**
+ * Loads the situation catalogue from the API, which reads it from the `situations` collection in
+ * MongoDB. The IndexedDB copy is a cache of that response — not a hardcoded list — so an offline
+ * device still shows what the database last said. Returns [] if it has never been online.
+ */
 export async function loadSituations(): Promise<SituationOption[]> {
   try {
     const result = await apiFetch<{ situations: SituationOption[] }>("/api/sos/situations");
     await cacheValue(SITUATIONS_KEY, result.situations);
     return result.situations;
   } catch {
-    return (await readCachedValue<SituationOption[]>(SITUATIONS_KEY)) ?? FALLBACK_SITUATIONS;
+    return (await readCachedValue<SituationOption[]>(SITUATIONS_KEY)) ?? [];
+  }
+}
+
+export async function loadSafeWordSuggestions(): Promise<Array<{ phrase: string; romanized?: string }>> {
+  try {
+    const result = await apiFetch<{ suggestions: Array<{ phrase: string; romanized?: string }> }>("/api/safe-word/suggestions");
+    await cacheValue(SUGGESTIONS_KEY, result.suggestions);
+    return result.suggestions;
+  } catch {
+    return (await readCachedValue<Array<{ phrase: string; romanized?: string }>>(SUGGESTIONS_KEY)) ?? [];
   }
 }
 

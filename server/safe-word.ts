@@ -23,8 +23,6 @@ const COMMON_PHRASES = new Set([
 export const SAFE_WORD_SENSITIVITIES = ["low", "normal", "high"] as const;
 export type SafeWordSensitivity = (typeof SAFE_WORD_SENSITIVITIES)[number];
 
-export const SUGGESTED_SAFE_WORDS = ["নীল আকাশ", "সাদা পাথর", "লাল ঘুড়ি", "সোনালি নদী"];
-
 export function describeSafeWordProblem(phrase: string): string | null {
 	const normalized = normalizeBangla(phrase);
 	if (normalized.replace(/\s+/g, "").length < 5) return "Safe-word is too short — it will trigger by accident. Use at least five letters.";

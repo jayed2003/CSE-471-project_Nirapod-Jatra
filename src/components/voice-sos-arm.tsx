@@ -4,12 +4,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { CheckCircle2, Mic, MicOff, ShieldCheck, X } from "lucide-react";
 import { apiFetch } from "@/lib/api-client";
 import { useSafeWordListener } from "@/hooks/useSafeWordListener";
-import { generateSosScript, loadSituations, FALLBACK_SITUATIONS, type SituationOption, type SituationType, type SosScript } from "@/lib/sos-script";
+import { generateSosScript, loadSafeWordSuggestions, loadSituations, type SituationOption, type SituationType, type SosScript } from "@/lib/sos-script";
 import { SosScriptView, type ScriptContact } from "@/components/sos-script-view";
 import type { SafeWordSensitivity, SafeWordSetting } from "@/lib/safe-word";
 
 const COUNTDOWN_SECONDS = 5;
-const SUGGESTIONS = ["নীল আকাশ", "সাদা পাথর", "লাল ঘুড়ি", "সোনালি নদী"];
 
 const SENSITIVITY_HELP: Record<SafeWordSensitivity, string> = {
   low: "Strictest match. Fewest false alarms, but a slurred or rushed phrase may be missed.",
@@ -49,7 +48,8 @@ export function VoiceSosArm({ center, accuracyM, contacts, callerName, initialSa
 
   const [armed, setArmed] = useState(false);
   const [testMode, setTestMode] = useState(false);
-  const [situations, setSituations] = useState<SituationOption[]>(FALLBACK_SITUATIONS);
+  const [situations, setSituations] = useState<SituationOption[]>([]);
+  const [suggestions, setSuggestions] = useState<Array<{ phrase: string; romanized?: string }>>([]);
   const [voiceSituation, setVoiceSituation] = useState<SituationType>("unknown");
 
   const [countdown, setCountdown] = useState<number | null>(null);
@@ -58,14 +58,17 @@ export function VoiceSosArm({ center, accuracyM, contacts, callerName, initialSa
   const [fireStatus, setFireStatus] = useState("");
   const detectionRef = useRef<{ heard: string; confidence: number } | null>(null);
 
-  useEffect(() => { void loadSituations().then(setSituations); }, []);
+  useEffect(() => {
+    void loadSituations().then(setSituations);
+    void loadSafeWordSuggestions().then(setSuggestions);
+  }, []);
 
   const dispatchVoiceSos = useCallback(async () => {
     const detection = detectionRef.current;
     setFireStatus("Building your SOS script...");
-    const situation = situations.find((option) => option.type === voiceSituation) ?? FALLBACK_SITUATIONS[FALLBACK_SITUATIONS.length - 1];
+    const situation = situations.find((option) => option.type === voiceSituation) ?? null;
     const coordinates = center ? { lat: center[1], lon: center[0], accuracyM } : null;
-    const script = coordinates ? await generateSosScript({ coordinates, situation, callerName }) : null;
+    const script = coordinates && situation ? await generateSosScript({ coordinates, situation, callerName }) : null;
     setFiredScript(script);
     try {
       const result = await apiFetch<{ contactsNotified: number; emailsSent: number }>("/api/sos", {
@@ -92,7 +95,7 @@ export function VoiceSosArm({ center, accuracyM, contacts, callerName, initialSa
     setCountdown(COUNTDOWN_SECONDS);
   }, [testMode]);
 
-  const { supported, listening, error, lastHeard } = useSafeWordListener({ enabled: armed && Boolean(savedPhrase), phrase: savedPhrase, romanized, sensitivity, onMatch });
+  const { supported, listening, error, lastHeard, sessions } = useSafeWordListener({ enabled: armed && Boolean(savedPhrase), phrase: savedPhrase, romanized, sensitivity, onMatch });
 
   // Armed countdown, not a confirmation tap. The premise of a safe-word is that the user cannot
   // interact with the phone, so the alert must fire on its own; the window exists only to let a
@@ -134,12 +137,14 @@ export function VoiceSosArm({ center, accuracyM, contacts, callerName, initialSa
         <span>Your safe-word (Bangla)</span>
         <input value={phrase} onChange={(event) => setPhrase(event.target.value)} maxLength={40} placeholder="নীল আকাশ" lang="bn" />
       </label>
-      <div className="voice-suggestions">
-        <span>Suggestions:</span>
-        {SUGGESTIONS.map((suggestion) => (
-          <button key={suggestion} type="button" className="text-button" lang="bn" onClick={() => setPhrase(suggestion)}>{suggestion}</button>
-        ))}
-      </div>
+      {suggestions.length > 0 && (
+        <div className="voice-suggestions">
+          <span>Suggestions:</span>
+          {suggestions.map((suggestion) => (
+            <button key={suggestion.phrase} type="button" className="text-button" lang="bn" onClick={() => { setPhrase(suggestion.phrase); if (suggestion.romanized) setRomanized(suggestion.romanized); }}>{suggestion.phrase}</button>
+          ))}
+        </div>
+      )}
       <p className="voice-hint">Pick something you would never say by accident — and that won&apos;t alarm anyone standing next to you.</p>
 
       <label className="voice-field">
@@ -186,6 +191,9 @@ export function VoiceSosArm({ center, accuracyM, contacts, callerName, initialSa
         <div className="voice-status" role="status">
           <span className={listening ? "voice-dot live" : "voice-dot"} />
           {listening ? "Listening for your safe-word" : "Reconnecting to the microphone..."}
+          {/* Session count makes the restart loop visible — a number that keeps climbing means
+              the watchdog is working, not that something is broken. */}
+          <small>Session #{sessions} · say your phrase clearly, then pause</small>
           {lastHeard && <small lang="bn">Heard: {lastHeard}</small>}
         </div>
       )}

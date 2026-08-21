@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { bearingBetween, composeSosScript, isRecognisableName, mapsUrlFor, shortAddress, SITUATIONS, speakCoordinateBn, toBanglaDigits, type SosScriptFacts } from "./sos-script.js";
+import { bearingBetween, composeSosScript, isRecognisableName, mapsUrlFor, shortAddress, speakCoordinateBn, toBanglaDigits, type SosScriptFacts } from "./sos-script.js";
+import { SITUATION_SEED } from "./seed.js";
 
 const DHAKA: [number, number] = [90.4074, 23.7806];
 
+// The composer is pure, so it is tested against the seed row rather than a live database read.
+const seedSituation = (type: string) => SITUATION_SEED.find((situation) => situation.type === type)!;
+
 function factsFor(overrides: Partial<SosScriptFacts> = {}): SosScriptFacts {
-	const situation = SITUATIONS.accident;
+	const situation = seedSituation("accident");
 	return {
 		callerName: "Ayesha Rahman",
 		callerPhone: "01711223344",

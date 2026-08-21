@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { haversineKm, nearestHospital, OVERPASS_INSTANCES } from "./warnings.js";
+import { Situation } from "./models/Situation.js";
 
 export type SituationType = "medical" | "accident" | "fire" | "flood" | "crime" | "harassment" | "stranded" | "unknown";
 export type ScriptLanguage = "bn" | "en" | "both";
@@ -37,18 +38,23 @@ type ServiceKey = "ambulance" | "police" | "fire" | "any";
 
 export const SITUATION_TYPES = ["medical", "accident", "fire", "flood", "crime", "harassment", "stranded", "unknown"] as const;
 
-// Fixed phrasing per situation. Deliberately a static table and not generated text: the
-// sentence a 999 operator hears must be identical every time so it is never ambiguous.
-export const SITUATIONS: Record<SituationType, { bn: string; en: string; service: ServiceKey; serviceBn: string; followUpBn: string[]; followUpEn: string[] }> = {
-	medical: { bn: "চিকিৎসা জরুরি অবস্থা", en: "medical emergency", service: "ambulance", serviceBn: "অ্যাম্বুলেন্স", followUpBn: ["রোগীর বয়স কত?", "রোগী কি জ্ঞান হারিয়েছে?", "শ্বাস নিতে পারছে কি?"], followUpEn: ["How old is the patient?", "Is the patient conscious?", "Are they breathing?"] },
-	accident: { bn: "সড়ক দুর্ঘটনা", en: "road accident", service: "ambulance", serviceBn: "অ্যাম্বুলেন্স", followUpBn: ["কতজন আহত?", "কেউ কি গাড়িতে আটকে আছে?", "রাস্তা কি বন্ধ হয়ে গেছে?"], followUpEn: ["How many people are injured?", "Is anyone trapped in a vehicle?", "Is the road blocked?"] },
-	fire: { bn: "আগুন লেগেছে", en: "fire", service: "fire", serviceBn: "ফায়ার সার্ভিস", followUpBn: ["আগুন কোন তলায়?", "ভেতরে কেউ আটকে আছে?", "গ্যাস সিলিন্ডার আছে কি?"], followUpEn: ["Which floor is the fire on?", "Is anyone trapped inside?", "Are there gas cylinders nearby?"] },
-	flood: { bn: "বন্যার পানিতে আটকে আছি", en: "trapped by floodwater", service: "fire", serviceBn: "ফায়ার সার্ভিস", followUpBn: ["পানির উচ্চতা কত?", "সাথে কতজন আছেন?", "শিশু বা বয়স্ক কেউ আছে?"], followUpEn: ["How deep is the water?", "How many people are with you?", "Any children or elderly?"] },
-	crime: { bn: "আমি আক্রমণের শিকার হয়েছি", en: "assault or crime in progress", service: "police", serviceBn: "পুলিশ", followUpBn: ["আক্রমণকারী কি এখনো সেখানে আছে?", "কেউ কি আহত?", "অস্ত্র আছে কি?"], followUpEn: ["Is the attacker still there?", "Is anyone injured?", "Are there weapons?"] },
-	harassment: { bn: "আমি হয়রানির শিকার হচ্ছি এবং নিরাপদ বোধ করছি না", en: "harassment, I do not feel safe", service: "police", serviceBn: "পুলিশ", followUpBn: ["আপনি কি এখন নিরাপদ জায়গায় আছেন?", "অভিযুক্তকে চেনেন?", "আশেপাশে লোকজন আছে?"], followUpEn: ["Are you somewhere safe right now?", "Do you know the person?", "Are there other people around?"] },
-	stranded: { bn: "আমি আটকে পড়েছি, নিরাপদ জায়গায় যেতে পারছি না", en: "stranded and unable to reach safety", service: "any", serviceBn: "জরুরি সেবা", followUpBn: ["সাথে কতজন আছেন?", "খাবার ও পানি আছে কি?", "ফোনের চার্জ কতটুকু?"], followUpEn: ["How many people are with you?", "Do you have food and water?", "How much phone battery is left?"] },
-	unknown: { bn: "জরুরি অবস্থা", en: "emergency", service: "any", serviceBn: "জরুরি সেবা", followUpBn: ["ঠিক কী ঘটেছে?", "কেউ কি আহত?", "আপনি কি নিরাপদ?"], followUpEn: ["What exactly happened?", "Is anyone injured?", "Are you safe?"] },
-};
+export type SituationRecord = { type: SituationType; bn: string; en: string; service: ServiceKey; serviceBn: string; followUpBn: string[]; followUpEn: string[] };
+
+/**
+ * Reads the whole situation catalogue from MongoDB, ordered for display.
+ * The wording is stored in the `situations` collection (seeded by server/seed.ts) rather than in
+ * this file, so it can be corrected without a redeploy.
+ */
+export async function listSituations(): Promise<SituationRecord[]> {
+	return Situation.find().sort({ order: 1 }).lean() as Promise<SituationRecord[]>;
+}
+
+/** Reads a single situation by its type key. Runs on every script generation. */
+export async function getSituation(type: SituationType): Promise<SituationRecord> {
+	const situation = await Situation.findOne({ type }).lean() as SituationRecord | null;
+	if (!situation) throw new Error(`Situation "${type}" is not in the database. Run "npm run seed" to populate the situations collection.`);
+	return situation;
+}
 
 export const sosScriptSchema = z.object({
 	location: z.object({ lat: z.number().min(-90).max(90), lon: z.number().min(-180).max(180), accuracyM: z.number().nonnegative().optional() }),
@@ -246,12 +252,14 @@ export function composeSosScript(facts: SosScriptFacts, language: ScriptLanguage
 export async function buildSosScript(input: z.infer<typeof sosScriptSchema> & { callerName: string }): Promise<SosScript> {
 	const { lat, lon, accuracyM } = input.location;
 	const point: [number, number] = [lon, lat];
-	const [address, landmarks, hospital] = await Promise.all([
+	// Four lookups in parallel: one MongoDB read for the situation wording, three live
+	// third-party reads for the location context.
+	const [situationEntry, address, landmarks, hospital] = await Promise.all([
+		getSituation(input.situationType),
 		reverseGeocode(lat, lon),
 		fetchLandmarks(point),
 		nearestHospital(point).catch(() => null),
 	]);
-	const situationEntry = SITUATIONS[input.situationType];
 	const facts: SosScriptFacts = {
 		callerName: input.callerName,
 		callerPhone: input.callerPhone,

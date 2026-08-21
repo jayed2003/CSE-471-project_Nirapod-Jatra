@@ -35,6 +35,9 @@ export function isSafeWordSupported() {
 
 const MAX_CONSECUTIVE_RESTARTS = 25;
 const RETRIGGER_COOLDOWN_MS = 60_000;
+// Chrome fires `no-speech` after a few seconds of quiet. That is the normal case for a listener
+// that waits for one phrase, so it must not count as a failure or feed the backoff.
+const BENIGN_ERRORS = new Set(["no-speech", "aborted"]);
 
 export type SafeWordListenerOptions = {
   enabled: boolean;
@@ -49,6 +52,8 @@ export type SafeWordListenerState = {
   listening: boolean;
   error: string | null;
   lastHeard: string;
+  /** How many recognition sessions have started since arming — visible proof the loop is alive. */
+  sessions: number;
 };
 
 /**
@@ -56,16 +61,17 @@ export type SafeWordListenerState = {
  * contains the user's safe-word.
  *
  * Chrome ends a continuous session roughly every minute and on every silence timeout, so the
- * watchdog restart below is not defensive polish — without it the feature dies silently after
- * the first minute and the user has no way to tell.
+ * restart loop below is not defensive polish — without it the feature dies silently after the
+ * first minute. Each restart builds a FRESH recognition object: reusing one across sessions is
+ * unreliable in Chrome and is the usual cause of a listener that stops hearing anything.
  */
 export function useSafeWordListener({ enabled, phrase, romanized, sensitivity, onMatch }: SafeWordListenerOptions): SafeWordListenerState {
   const [supported] = useState(() => isSafeWordSupported());
   const [sessionLive, setSessionLive] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastHeard, setLastHeard] = useState("");
+  const [sessions, setSessions] = useState(0);
 
-  const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
   const activeRef = useRef(false);
   const restartsRef = useRef(0);
   const restartTimerRef = useRef<number | null>(null);
@@ -82,93 +88,133 @@ export function useSafeWordListener({ enabled, phrase, romanized, sensitivity, o
     if (!enabled || !Recognition || !phrase) {
       activeRef.current = false;
       clearRestartTimer();
-      recognitionRef.current?.abort();
-      recognitionRef.current = null;
-      // `listening` is derived from `enabled` below, so there is nothing to reset here.
       return;
     }
 
     activeRef.current = true;
     restartsRef.current = 0;
 
-    const recognition = new Recognition();
-    recognition.lang = "bn-BD";
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.maxAlternatives = 3;
-    recognitionRef.current = recognition;
+    // `current` and `running` are closure-local rather than refs: they belong to this arming
+    // session only, and the cleanup below disposes of them with it.
+    let current: SpeechRecognitionInstance | null = null;
+    let running = false;
 
-    const start = () => {
-      if (!activeRef.current) return;
-      try { recognition.start(); } catch { /* already started — the onend handler will retry */ }
+    const disposeCurrent = () => {
+      if (!current) return;
+      current.onresult = null;
+      current.onerror = null;
+      current.onend = null;
+      current.onstart = null;
+      try { current.abort(); } catch { /* already stopped */ }
+      current = null;
+      running = false;
     };
 
-    const scheduleRestart = () => {
+    const scheduleRestart = (immediate = false) => {
       if (!activeRef.current) return;
       if (restartsRef.current >= MAX_CONSECUTIVE_RESTARTS) {
         setError("Voice listening stopped after repeated failures. Turn it off and on to retry.");
         setSessionLive(false);
         return;
       }
-      const delay = Math.min(250 * 2 ** restartsRef.current, 4_000);
+      const delay = immediate ? 150 : Math.min(300 * 2 ** restartsRef.current, 4_000);
       restartsRef.current += 1;
       clearRestartTimer();
-      restartTimerRef.current = window.setTimeout(start, delay);
+      restartTimerRef.current = window.setTimeout(startSession, delay);
     };
 
-    recognition.onstart = () => { restartsRef.current = 0; setSessionLive(true); setError(null); };
+    function startSession() {
+      if (!activeRef.current || running) return;
+      // A hidden tab has its microphone suspended by Chrome; starting here would fail in a loop.
+      // The visibilitychange handler restarts us when the page comes back.
+      if (typeof document !== "undefined" && document.hidden) return;
 
-    recognition.onresult = (event) => {
-      let transcript = "";
-      for (let index = event.resultIndex; index < event.results.length; index += 1) {
-        const result = event.results[index];
-        // Check every alternative: the top-ranked bn-BD transcript is often not the closest one.
-        for (let alternative = 0; alternative < result.length; alternative += 1) transcript += ` ${result[alternative].transcript}`;
-      }
-      transcript = transcript.trim();
-      if (!transcript) return;
-      setLastHeard(transcript.slice(-120));
-      const confidence = matchSafeWord(transcript, phrase, sensitivity, romanized);
-      if (!confidence) return;
-      if (Date.now() - lastTriggerRef.current < RETRIGGER_COOLDOWN_MS) return;
-      lastTriggerRef.current = Date.now();
-      onMatchRef.current(transcript.slice(-120), confidence);
-    };
+      const recognition = new Recognition!();
+      recognition.lang = "bn-BD";
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.maxAlternatives = 3;
 
-    recognition.onerror = (event) => {
-      if (event.error === "not-allowed" || event.error === "service-not-allowed") {
-        activeRef.current = false;
-        setError("Microphone access was blocked. Allow it in your browser to use the safe-word.");
+      recognition.onstart = () => {
+        running = true;
+        restartsRef.current = 0;
+        setSessionLive(true);
+        setError(null);
+        setSessions((count) => count + 1);
+      };
+
+      recognition.onresult = (event) => {
+        let transcript = "";
+        for (let index = event.resultIndex; index < event.results.length; index += 1) {
+          const result = event.results[index];
+          // Check every alternative: the top-ranked bn-BD transcript is often not the closest one.
+          for (let alternative = 0; alternative < result.length; alternative += 1) transcript += ` ${result[alternative].transcript}`;
+        }
+        transcript = transcript.trim();
+        if (!transcript) return;
+        setLastHeard(transcript.slice(-120));
+        const confidence = matchSafeWord(transcript, phrase!, sensitivity, romanized);
+        if (!confidence) return;
+        if (Date.now() - lastTriggerRef.current < RETRIGGER_COOLDOWN_MS) return;
+        lastTriggerRef.current = Date.now();
+        onMatchRef.current(transcript.slice(-120), confidence);
+      };
+
+      recognition.onerror = (event) => {
+        if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+          activeRef.current = false;
+          setError("Microphone access was blocked. Allow it in your browser to use the safe-word.");
+          setSessionLive(false);
+          return;
+        }
+        if (event.error === "audio-capture") {
+          activeRef.current = false;
+          setError("No microphone found. Check that your mic is connected and not in use by another app.");
+          setSessionLive(false);
+          return;
+        }
+        // Silence is expected while waiting for a safe-word, so don't let it drive the backoff.
+        if (BENIGN_ERRORS.has(event.error)) { restartsRef.current = 0; return; }
+        if (event.error === "network") setError("Speech recognition needs an internet connection. Retrying...");
+      };
+
+      recognition.onend = () => {
+        const wasRunning = running;
+        running = false;
+        current = null;
         setSessionLive(false);
-        return;
+        // A clean end after a live session restarts fast; a session that never started backs off.
+        scheduleRestart(wasRunning);
+      };
+
+      current = recognition;
+      try {
+        recognition.start();
+      } catch {
+        // InvalidStateError etc. — drop this instance and try a fresh one.
+        disposeCurrent();
+        scheduleRestart();
       }
-      if (event.error === "audio-capture") {
-        activeRef.current = false;
-        setError("No microphone found.");
-        setSessionLive(false);
-        return;
-      }
-      // "no-speech", "network" and "aborted" are routine; onend fires next and restarts us.
-      if (event.error === "network") setError("Speech recognition needs an internet connection. Retrying...");
+    }
+
+    const handleVisibility = () => {
+      if (document.hidden) return;
+      restartsRef.current = 0;
+      if (!running) startSession();
     };
+    document.addEventListener("visibilitychange", handleVisibility);
 
-    recognition.onend = () => { setSessionLive(false); scheduleRestart(); };
-
-    start();
+    startSession();
 
     return () => {
       activeRef.current = false;
       clearRestartTimer();
-      recognition.onresult = null;
-      recognition.onerror = null;
-      recognition.onend = null;
-      recognition.onstart = null;
-      try { recognition.abort(); } catch { /* nothing to abort */ }
-      recognitionRef.current = null;
+      document.removeEventListener("visibilitychange", handleVisibility);
+      disposeCurrent();
       setSessionLive(false);
     };
   }, [enabled, phrase, romanized, sensitivity, clearRestartTimer]);
 
   // Masked by `enabled` so a stale session flag never claims we are listening after disarming.
-  return { supported, listening: enabled && sessionLive, error, lastHeard };
+  return { supported, listening: enabled && sessionLive, error, lastHeard, sessions };
 }

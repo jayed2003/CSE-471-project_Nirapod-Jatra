@@ -3,13 +3,13 @@
 import { useEffect, useState } from "react";
 import { FileText, Loader2, Send } from "lucide-react";
 import { apiFetch } from "@/lib/api-client";
-import { FALLBACK_SITUATIONS, generateSosScript, loadSituations, primeSosKit, type SituationOption, type SituationType, type SosScript } from "@/lib/sos-script";
+import { generateSosScript, loadSituations, primeSosKit, type SituationOption, type SituationType, type SosScript } from "@/lib/sos-script";
 import { SosScriptView, type ScriptContact } from "@/components/sos-script-view";
 
 const KIT_REFRESH_MS = 3 * 60 * 1000;
 
 export function SosScriptPanel({ center, accuracyM, contacts, callerName }: { center: [number, number]; accuracyM?: number; contacts: ScriptContact[]; callerName: string }) {
-  const [situations, setSituations] = useState<SituationOption[]>(FALLBACK_SITUATIONS);
+  const [situations, setSituations] = useState<SituationOption[]>([]);
   const [situationType, setSituationType] = useState<SituationType>("unknown");
   const [note, setNote] = useState("");
   const [script, setScript] = useState<SosScript | null>(null);
@@ -30,7 +30,8 @@ export function SosScriptPanel({ center, accuracyM, contacts, callerName }: { ce
   async function generate() {
     setGenerating(true);
     setDispatchStatus("");
-    const situation = situations.find((option) => option.type === situationType) ?? FALLBACK_SITUATIONS[FALLBACK_SITUATIONS.length - 1];
+    const situation = situations.find((option) => option.type === situationType);
+    if (!situation) { setDispatchStatus("Situation list hasn't loaded from the server yet. Check your connection and try again."); setGenerating(false); return; }
     const generated = await generateSosScript({ coordinates: { lat: center[1], lon: center[0], accuracyM }, situation, note: note.trim() || undefined, callerName });
     setScript(generated);
     setGenerating(false);
@@ -64,6 +65,7 @@ export function SosScriptPanel({ center, accuracyM, contacts, callerName }: { ce
       <p>Pick what is happening. We build the exact wording — GPS, nearest landmark, situation — to read to a 999 operator or text to your contacts.</p>
 
       <div className="situation-picker" role="radiogroup" aria-label="Situation type">
+        {situations.length === 0 && <p className="sos-script-empty">Loading situations from the server...</p>}
         {situations.map((option) => (
           <button
             key={option.type}

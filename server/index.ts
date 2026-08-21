@@ -23,8 +23,10 @@ import { buildReadinessReport, nearbyEmergencyServices, nearestFloodGauge, neare
 import { getAirQuality, getAirQualityForecast, getCurrentWeather, getWeatherForecast } from "./weather.js";
 import { getRoutePlan } from "./routing.js";
 import { briefSchema as travelBriefSchema, buildTravelBrief } from "./travel-brief.js";
-import { buildSosScript, reverseGeocode, shortAddress, SITUATIONS, SITUATION_TYPES, sosScriptSchema, type SituationType } from "./sos-script.js";
-import { safeWordSchema, SUGGESTED_SAFE_WORDS } from "./safe-word.js";
+import { buildSosScript, getSituation, listSituations, reverseGeocode, shortAddress, SITUATION_TYPES, sosScriptSchema, type SituationType } from "./sos-script.js";
+import { safeWordSchema } from "./safe-word.js";
+import { SafeWordSuggestion } from "./models/SafeWordSuggestion.js";
+import { seedReferenceData } from "./seed.js";
 
 const app = express();
 const httpServer = createServer(app);
@@ -34,6 +36,15 @@ if (process.env.VAPID_SUBJECT && process.env.VAPID_PUBLIC_KEY && process.env.VAP
 app.use(helmet());
 app.use(cors({ origin: process.env.CLIENT_ORIGIN ?? "http://localhost:3000" }));
 app.use(express.json({ limit: "64kb" }));
+// Request log. Placed before the rate limiter so throttled (429) requests are logged too.
+// Off in production, and silenced entirely with API_LOG=0.
+if (process.env.NODE_ENV !== "production" && process.env.API_LOG !== "0") {
+	app.use((request, response, next) => {
+		const startedAt = Date.now();
+		response.on("finish", () => console.log(`[API] ${request.method.padEnd(6)} ${request.originalUrl} -> ${response.statusCode} (${Date.now() - startedAt}ms)`));
+		next();
+	});
+}
 const rateLimitMessage = (error: string) => ({ windowMs: 60_000, limit: 5, message: { error } });
 app.use(rateLimit({
 	windowMs: 15 * 60 * 1000,
@@ -73,7 +84,7 @@ app.get("/api/health", (_request, response) => response.json({ status: "ok" }));
 app.post("/api/auth/register", rateLimit(rateLimitMessage("Too many sign-up attempts. Please wait a minute and try again.")), async (request, response, next) => { try { const input = z.object({ email: z.string().email("Enter a valid email address"), displayName: z.string().min(2, "Name must be at least 2 characters").max(80), password: z.string().min(12, "Password must be at least 12 characters").max(128), deviceName: z.string().min(2).max(80).default("Web browser"), locationMonitoringEnabled: z.boolean().default(false) }).parse(request.body); const passwordHash = await bcrypt.hash(input.password, 12); const user = await User.create({ email: input.email, displayName: input.displayName, passwordHash, locationMonitoringEnabled: input.locationMonitoringEnabled, trustedDevices: [{ name: input.deviceName }] }); response.status(201).json({ token: issueToken(String(user._id)), user: { id: user._id, email: user.email, displayName: user.displayName } }); } catch (error) { if (error instanceof Error && "code" in error && error.code === 11000) return response.status(409).json({ error: "An account with that email already exists" }); next(error); } });
 app.post("/api/auth/login", rateLimit({ windowMs: 60_000, limit: 8, message: { error: "Too many sign-in attempts. Please wait a minute and try again." } }), async (request, response, next) => { try { const input = z.object({ email: z.string().email("Enter a valid email address"), password: z.string().min(1, "Password is required"), deviceName: z.string().min(2).max(80).default("Web browser") }).parse(request.body); const user = await User.findOne({ email: input.email.toLowerCase() }).select("+passwordHash"); if (!user || !(await bcrypt.compare(input.password, user.passwordHash))) return response.status(401).json({ error: "Invalid email or password" }); user.trustedDevices.push({ name: input.deviceName, lastSeenAt: new Date(), createdAt: new Date() }); await user.save(); response.json({ token: issueToken(String(user._id)), user: { id: user._id, email: user.email, displayName: user.displayName } }); } catch (error) { next(error); } });
 app.get("/api/me", requireAuth, async (request: AuthRequest, response, next) => { try { const user = await User.findById(request.userId).lean(); if (!user) return response.status(404).json({ error: "User not found" }); const [contacts, trips] = await Promise.all([EmergencyContact.find({ userId: user._id }).sort({ priority: 1 }).lean(), Trip.find({ userId: user._id }).sort({ updatedAt: -1 }).limit(20).lean()]); response.json({ user: { id: user._id, email: user.email, displayName: user.displayName, phone: user.phone, safeWord: user.safeWord ?? { enabled: false, sensitivity: "normal" }, trustedDevices: user.trustedDevices }, contacts, trips }); } catch (error) { next(error); } });
-app.get("/api/safe-word/suggestions", (_request, response) => response.json({ suggestions: SUGGESTED_SAFE_WORDS }));
+app.get("/api/safe-word/suggestions", async (_request, response, next) => { try { const suggestions = await SafeWordSuggestion.find().sort({ order: 1 }).lean(); response.json({ suggestions: suggestions.map((suggestion: { phrase: string; romanized?: string }) => ({ phrase: suggestion.phrase, romanized: suggestion.romanized })) }); } catch (error) { next(error); } });
 app.put("/api/me/safe-word", requireAuth, async (request: AuthRequest, response, next) => { try { const input = safeWordSchema.parse(request.body); const user = await User.findByIdAndUpdate(request.userId, { safeWord: { ...input, updatedAt: new Date() } }, { new: true }); if (!user) return response.status(404).json({ error: "User not found" }); response.json({ safeWord: user.safeWord }); } catch (error) { next(error); } });
 app.delete("/api/me/safe-word", requireAuth, async (request: AuthRequest, response, next) => { try { await User.findByIdAndUpdate(request.userId, { $unset: { safeWord: 1 } }); response.status(204).end(); } catch (error) { next(error); } });
 app.put("/api/me", requireAuth, async (request: AuthRequest, response, next) => { try { const input = z.object({ displayName: z.string().min(2).max(80), phone: z.string().trim().min(7).max(30).optional() }).parse(request.body); const user = await User.findByIdAndUpdate(request.userId, input, { new: true }); response.json({ id: user?._id, email: user?.email, displayName: user?.displayName, phone: user?.phone }); } catch (error) { next(error); } });
@@ -115,7 +126,7 @@ app.post("/api/trips/:id/refresh-risk", requireAuth, async (request: AuthRequest
 app.get("/api/trips/:id/readiness", requireAuth, async (request: AuthRequest, response, next) => { try { const trip = await Trip.findOne({ _id: request.params.id, userId: request.userId }); if (!trip) return response.status(404).json({ error: "Trip not found" }); const READINESS_STALE_MS = 15 * 60 * 1000; const checkedAt = trip.readiness?.checkedAt ? new Date(trip.readiness.checkedAt).getTime() : 0; if (Date.now() - checkedAt > READINESS_STALE_MS) { const report = await buildReadinessReport(trip.route?.geometry); trip.readiness = { ...report, offlineMap: { ...report.offlineMap, status: trip.readiness?.offlineMap?.status ?? "pending" } }; await trip.save(); } response.json(trip.readiness); } catch (error) { next(error); } });
 app.post("/api/trips/:id/readiness/offline", requireAuth, async (request: AuthRequest, response, next) => { try { const trip = await Trip.findOneAndUpdate({ _id: request.params.id, userId: request.userId }, { $set: { "readiness.offlineMap.status": "downloaded", "readiness.offlineMap.downloadedAt": new Date() } }, { new: true }); if (!trip) return response.status(404).json({ error: "Trip not found" }); response.json({ offlineMap: trip.readiness?.offlineMap }); } catch (error) { next(error); } });
 app.get("/api/risk-alerts", requireAuth, async (request: AuthRequest, response, next) => { try { const trips = await Trip.find({ userId: request.userId, riskAlert: { $exists: true } }).select("destination riskAlert").lean(); response.json({ alerts: trips.map((trip) => ({ tripId: trip._id, destination: trip.destination, factor: trip.riskAlert?.factor, previous: trip.riskAlert?.previous, current: trip.riskAlert?.current })) }); } catch (error) { next(error); } });
-app.get("/api/sos/situations", (_request, response) => response.json({ situations: SITUATION_TYPES.map((type) => ({ type, bn: SITUATIONS[type].bn, en: SITUATIONS[type].en, service: SITUATIONS[type].service, serviceBn: SITUATIONS[type].serviceBn })) }));
+app.get("/api/sos/situations", async (_request, response, next) => { try { const situations = await listSituations(); response.json({ situations: situations.map(({ type, bn, en, service, serviceBn }) => ({ type, bn, en, service, serviceBn })) }); } catch (error) { next(error); } });
 // Composes the exact wording to read to a 999 operator (or SMS to a contact) from live GPS,
 // a ranked nearby landmark and the situation type. Separate from POST /api/sos on purpose:
 // the caller previews and can correct the script before anything is dispatched.
@@ -148,7 +159,8 @@ app.post("/api/sos", requireAuth, rateLimit({ windowMs: 60_000, limit: 5 }), asy
 	}
 	const event = await SosEvent.create({ tripId: input.tripId, location: input.location, accuracyM: input.accuracyM, message: input.message, situationType: input.situationType, trigger: input.trigger, voice: input.voice, script, userId: request.userId });
 	const locationUrl = coordinates ? `https://www.google.com/maps?q=${coordinates[1]},${coordinates[0]}` : undefined;
-	const results = await Promise.all(contacts.map((contact) => sendSosAlertEmail(contact.email, { requesterName, message: input.message, locationUrl, timestamp: event.createdAt as Date, script: script?.plain, situation: SITUATIONS[input.situationType as SituationType].en })));
+	const situationEntry = await getSituation(input.situationType as SituationType).catch(() => null);
+	const results = await Promise.all(contacts.map((contact) => sendSosAlertEmail(contact.email, { requesterName, message: input.message, locationUrl, timestamp: event.createdAt as Date, script: script?.plain, situation: situationEntry?.en })));
 	const emailsSent = results.filter(Boolean).length;
 	event.deliveries = contacts.map((contact, index) => ({ channel: "email", target: contact.email, status: results[index] ? "sent" : "failed", at: new Date() }));
 	await event.save();
@@ -165,5 +177,11 @@ app.post("/api/internal/readiness-check", async (request, response, next) => { t
 app.use((error: unknown, _request: express.Request, response: express.Response, _next: express.NextFunction) => { const message = error instanceof z.ZodError ? error.issues[0]?.message ?? "Invalid request" : error instanceof Error ? error.message : "Unexpected error"; response.status(error instanceof z.ZodError ? 400 : 500).json({ error: message }); });
 httpServer.listen(port, () => console.log(`Safety API listening on ${port}`));
 void connectDatabase()
-	.then(() => console.log("Database connected"))
+	.then(async () => {
+		console.log("Database connected");
+		// Idempotent: inserts the situation catalogue and safe-word suggestions only if missing,
+		// so a fresh clone of this repo has a working database without any manual import step.
+		const seeded = await seedReferenceData();
+		if (seeded.situationsInserted || seeded.suggestionsInserted) console.log(`Seeded reference data: ${seeded.situationsInserted} situation(s), ${seeded.suggestionsInserted} safe-word suggestion(s)`);
+	})
 	.catch((error) => console.error("Database connection failed; database-backed routes are unavailable", error));
