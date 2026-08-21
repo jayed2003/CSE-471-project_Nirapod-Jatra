@@ -12,6 +12,11 @@ export function RequireAuth({ children }: { children: React.ReactNode }) {
     sync();
     if (!getToken()) router.replace("/account");
   }, [router]);
-  if (!allowed) return <main className="subpage"><p className="auth-loading">Checking your secure session...</p></main>;
+  if (!allowed)
+    return (
+      <main className="subpage">
+        <p className="auth-loading">Checking your secure session...</p>
+      </main>
+    );
   return <>{children}</>;
 }

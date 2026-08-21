@@ -22,13 +22,24 @@ export function AppToaster() {
 
   if (!alert) return null;
 
-  return <aside className="app-toaster" role="alert" aria-live="assertive">
-    <div className="app-toaster-icon"><AlertTriangle size={20} /></div>
-    <div className="app-toaster-copy">
-      <span><Wind size={14} /> AQI {alert.aqi} at {alert.destination.split(",")[0]}</span>
-      <strong>Air quality warning</strong>
-      <p>The air quality is very bad at your destination. Consider limiting your outdoor activities.</p>
-    </div>
-    <button type="button" onClick={() => setAlert(null)} aria-label="Dismiss air quality warning"><X size={18} /></button>
-  </aside>;
+  return (
+    <aside className="app-toaster" role="alert" aria-live="assertive">
+      <div className="app-toaster-icon">
+        <AlertTriangle size={20} />
+      </div>
+      <div className="app-toaster-copy">
+        <span>
+          <Wind size={14} /> AQI {alert.aqi} at {alert.destination.split(",")[0]}
+        </span>
+        <strong>Air quality warning</strong>
+        <p>
+          The air quality is very bad at your destination. Consider limiting your outdoor
+          activities.
+        </p>
+      </div>
+      <button type="button" onClick={() => setAlert(null)} aria-label="Dismiss air quality warning">
+        <X size={18} />
+      </button>
+    </aside>
+  );
 }

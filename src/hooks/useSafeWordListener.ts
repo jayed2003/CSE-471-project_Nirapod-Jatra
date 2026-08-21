@@ -5,8 +5,15 @@ import { matchSafeWord, type SafeWordSensitivity } from "@/lib/safe-word";
 
 // The Web Speech API is not in TypeScript's DOM lib, so declare the slice we use.
 type SpeechRecognitionAlternative = { transcript: string; confidence: number };
-type SpeechRecognitionResult = { readonly length: number; isFinal: boolean; [index: number]: SpeechRecognitionAlternative };
-type SpeechRecognitionEvent = { resultIndex: number; results: { readonly length: number; [index: number]: SpeechRecognitionResult } };
+type SpeechRecognitionResult = {
+  readonly length: number;
+  isFinal: boolean;
+  [index: number]: SpeechRecognitionAlternative;
+};
+type SpeechRecognitionEvent = {
+  resultIndex: number;
+  results: { readonly length: number; [index: number]: SpeechRecognitionResult };
+};
 type SpeechRecognitionErrorEvent = { error: string };
 type SpeechRecognitionInstance = {
   lang: string;
@@ -25,7 +32,10 @@ type SpeechRecognitionConstructor = new () => SpeechRecognitionInstance;
 
 function recognitionConstructor(): SpeechRecognitionConstructor | null {
   if (typeof window === "undefined") return null;
-  const scope = window as unknown as { SpeechRecognition?: SpeechRecognitionConstructor; webkitSpeechRecognition?: SpeechRecognitionConstructor };
+  const scope = window as unknown as {
+    SpeechRecognition?: SpeechRecognitionConstructor;
+    webkitSpeechRecognition?: SpeechRecognitionConstructor;
+  };
   return scope.SpeechRecognition ?? scope.webkitSpeechRecognition ?? null;
 }
 
@@ -65,7 +75,13 @@ export type SafeWordListenerState = {
  * first minute. Each restart builds a FRESH recognition object: reusing one across sessions is
  * unreliable in Chrome and is the usual cause of a listener that stops hearing anything.
  */
-export function useSafeWordListener({ enabled, phrase, romanized, sensitivity, onMatch }: SafeWordListenerOptions): SafeWordListenerState {
+export function useSafeWordListener({
+  enabled,
+  phrase,
+  romanized,
+  sensitivity,
+  onMatch,
+}: SafeWordListenerOptions): SafeWordListenerState {
   const [supported] = useState(() => isSafeWordSupported());
   const [sessionLive, setSessionLive] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -77,10 +93,15 @@ export function useSafeWordListener({ enabled, phrase, romanized, sensitivity, o
   const restartTimerRef = useRef<number | null>(null);
   const lastTriggerRef = useRef(0);
   const onMatchRef = useRef(onMatch);
-  useEffect(() => { onMatchRef.current = onMatch; }, [onMatch]);
+  useEffect(() => {
+    onMatchRef.current = onMatch;
+  }, [onMatch]);
 
   const clearRestartTimer = useCallback(() => {
-    if (restartTimerRef.current !== null) { window.clearTimeout(restartTimerRef.current); restartTimerRef.current = null; }
+    if (restartTimerRef.current !== null) {
+      window.clearTimeout(restartTimerRef.current);
+      restartTimerRef.current = null;
+    }
   }, []);
 
   useEffect(() => {

@@ -1,7 +1,8 @@
 import { config } from "dotenv";
 config();
 config({ path: ".env.local", override: false });
-if (process.env.NODE_ENV !== "production" && !process.env.MONGODB_URI) config({ path: "atlas-credentials.env" });
+if (process.env.NODE_ENV !== "production" && !process.env.MONGODB_URI)
+  config({ path: "atlas-credentials.env" });
 import cors from "cors";
 import bcrypt from "bcryptjs";
 import express from "express";
@@ -12,18 +13,46 @@ import webpush from "web-push";
 import { createServer } from "node:http";
 import { Server } from "socket.io";
 import { z } from "zod";
+import { randomUUID } from "node:crypto";
+import { findTouristAttractions } from "./attractions.js";
 import { connectDatabase } from "./db.js";
-import { sendSosAlertEmail } from "./mail.js";
+import { sendLocationShareEmail, sendSosAlertEmail } from "./mail.js";
 import { EmergencyContact } from "./models/EmergencyContact.js";
+import { LocationShare } from "./models/LocationShare.js";
 import { SosEvent } from "./models/SosEvent.js";
 import { Trip } from "./models/Trip.js";
 import { User } from "./models/User.js";
 import { aqiLevel, buildBrief, fetchLiveRisk, severityRank, type RiskInputs } from "./risk.js";
-import { buildReadinessReport, nearbyEmergencyServices, nearestFloodGauge, nearestHospital } from "./warnings.js";
-import { getAirQuality, getAirQualityForecast, getCurrentWeather, getWeatherForecast } from "./weather.js";
+import {
+  buildReadinessReport,
+  nearbyEmergencyServices,
+  nearestFloodGauge,
+  nearestHospital,
+} from "./warnings.js";
+import {
+  getAirQuality,
+  getAirQualityForecast,
+  getCurrentWeather,
+  getWeatherForecast,
+} from "./weather.js";
 import { getRoutePlan } from "./routing.js";
-import { briefSchema as travelBriefSchema, buildTravelBrief } from "./travel-brief.js";
-import { buildSosScript, getSituation, listSituations, reverseGeocode, shortAddress, SITUATION_TYPES, sosScriptSchema, type SituationType } from "./sos-script.js";
+import {
+  briefSchema as travelBriefSchema,
+  buildBestTimeToVisit,
+  buildTravelBrief,
+} from "./travel-brief.js";
+import { zonesAlongRoute, emergencyBundleForZone, offlineTilesForZone } from "./lowNetworkZones.js";
+import { recommendDepartureTime } from "./tripTimeOptimizer.js";
+import {
+  buildSosScript,
+  getSituation,
+  listSituations,
+  reverseGeocode,
+  shortAddress,
+  SITUATION_TYPES,
+  sosScriptSchema,
+  type SituationType,
+} from "./sos-script.js";
 import { safeWordSchema } from "./safe-word.js";
 import { SafeWordSuggestion } from "./models/SafeWordSuggestion.js";
 import { seedReferenceData } from "./seed.js";
@@ -32,7 +61,12 @@ const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer, { cors: { origin: process.env.CLIENT_ORIGIN ?? true } });
 const port = Number(process.env.PORT ?? 4000);
-if (process.env.VAPID_SUBJECT && process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) webpush.setVapidDetails(process.env.VAPID_SUBJECT, process.env.VAPID_PUBLIC_KEY, process.env.VAPID_PRIVATE_KEY);
+if (process.env.VAPID_SUBJECT && process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY)
+  webpush.setVapidDetails(
+    process.env.VAPID_SUBJECT,
+    process.env.VAPID_PUBLIC_KEY,
+    process.env.VAPID_PRIVATE_KEY,
+  );
 app.use(helmet());
 app.use(cors({ origin: process.env.CLIENT_ORIGIN ?? "http://localhost:3000" }));
 app.use(express.json({ limit: "64kb" }));
@@ -46,142 +80,1308 @@ if (process.env.NODE_ENV !== "production" && process.env.API_LOG !== "0") {
 	});
 }
 const rateLimitMessage = (error: string) => ({ windowMs: 60_000, limit: 5, message: { error } });
-app.use(rateLimit({
-	windowMs: 15 * 60 * 1000,
-	limit: 300,
-	message: { error: "Too many requests. Please wait a minute and try again." },
-	skip: (request) => request.path === "/api/health" || request.path.startsWith("/api/auth/"),
-}));
+app.use(
+  rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 600,
+    message: { error: "Too many requests. Please wait a minute and try again." },
+    skip: (request) => request.path === "/api/health" || request.path.startsWith("/api/auth/"),
+  }),
+);
 
 type AuthRequest = express.Request & { userId?: string };
-function issueToken(userId: string) { const secret = process.env.JWT_SECRET; if (!secret) throw new Error("JWT_SECRET is required"); return jwt.sign({ sub: userId }, secret, { expiresIn: "7d" }); }
-function requireAuth(request: AuthRequest, response: express.Response, next: express.NextFunction) { try { const token = request.headers.authorization?.replace(/^Bearer\s+/i, ""); const secret = process.env.JWT_SECRET; if (!token || !secret) return response.status(401).json({ error: "Authentication required" }); const payload = jwt.verify(token, secret) as { sub?: string }; if (!payload.sub) return response.status(401).json({ error: "Authentication required" }); request.userId = payload.sub; next(); } catch { response.status(401).json({ error: "Authentication required" }); } }
+function issueToken(userId: string) {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) throw new Error("JWT_SECRET is required");
+  return jwt.sign({ sub: userId }, secret, { expiresIn: "7d" });
+}
+function requireAuth(request: AuthRequest, response: express.Response, next: express.NextFunction) {
+  try {
+    const token = request.headers.authorization?.replace(/^Bearer\s+/i, "");
+    const secret = process.env.JWT_SECRET;
+    if (!token || !secret) return response.status(401).json({ error: "Authentication required" });
+    const payload = jwt.verify(token, secret) as { sub?: string };
+    if (!payload.sub) return response.status(401).json({ error: "Authentication required" });
+    request.userId = payload.sub;
+    next();
+  } catch {
+    response.status(401).json({ error: "Authentication required" });
+  }
+}
+async function requirePremium(
+  request: AuthRequest,
+  response: express.Response,
+  next: express.NextFunction,
+) {
+  try {
+    const user = await User.findById(request.userId).select("plan").lean();
+    if (user?.plan !== "premium")
+      return response.status(403).json({ error: "This feature requires a Premium plan" });
+    next();
+  } catch (error) {
+    next(error);
+  }
+}
 
-const pointSchema = z.object({ type: z.literal("Point").default("Point"), coordinates: z.tuple([z.number(), z.number()]) });
-const tripSchema = z.object({ destination: z.string().min(2).max(200), origin: z.tuple([z.number(), z.number()]).optional(), destinationPoint: z.tuple([z.number(), z.number()]), travelDates: z.object({ start: z.coerce.date(), end: z.coerce.date() }).refine(({ start, end }) => end >= start, "Return date must be after departure date") });
-const geocodeCache = new Map<string, { savedAt: number; place: { lat: number; lon: number; displayName: string } | null }>();
+const pointSchema = z.object({
+  type: z.literal("Point").default("Point"),
+  coordinates: z.tuple([z.number(), z.number()]),
+});
+const tripSchema = z.object({
+  destination: z.string().min(2).max(200),
+  origin: z.tuple([z.number(), z.number()]).optional(),
+  destinationPoint: z.tuple([z.number(), z.number()]),
+  travelDates: z
+    .object({ start: z.coerce.date(), end: z.coerce.date() })
+    .refine(({ start, end }) => end >= start, "Return date must be after departure date"),
+});
+const geocodeCache = new Map<
+  string,
+  { savedAt: number; place: { lat: number; lon: number; displayName: string } | null }
+>();
 const GEOCODE_CACHE_MS = 30 * 24 * 60 * 60 * 1000;
 function fallbackRoute(origin: [number, number], destination: [number, number]) {
-	const earthRadiusMeters = 6_371_000;
-	const radians = (degrees: number) => degrees * Math.PI / 180;
-	const latitudeDelta = radians(destination[1] - origin[1]);
-	const longitudeDelta = radians(destination[0] - origin[0]);
-	const distanceFormula = Math.sin(latitudeDelta / 2) ** 2 + Math.cos(radians(origin[1])) * Math.cos(radians(destination[1])) * Math.sin(longitudeDelta / 2) ** 2;
-	const distanceMeters = Math.round(earthRadiusMeters * 2 * Math.atan2(Math.sqrt(distanceFormula), Math.sqrt(1 - distanceFormula)));
-	return { geometry: { type: "LineString", coordinates: [origin, destination] }, distanceMeters, durationSeconds: Math.round(distanceMeters / 11) };
+  const earthRadiusMeters = 6_371_000;
+  const radians = (degrees: number) => (degrees * Math.PI) / 180;
+  const latitudeDelta = radians(destination[1] - origin[1]);
+  const longitudeDelta = radians(destination[0] - origin[0]);
+  const distanceFormula =
+    Math.sin(latitudeDelta / 2) ** 2 +
+    Math.cos(radians(origin[1])) *
+      Math.cos(radians(destination[1])) *
+      Math.sin(longitudeDelta / 2) ** 2;
+  const distanceMeters = Math.round(
+    earthRadiusMeters * 2 * Math.atan2(Math.sqrt(distanceFormula), Math.sqrt(1 - distanceFormula)),
+  );
+  return {
+    geometry: { type: "LineString", coordinates: [origin, destination] },
+    distanceMeters,
+    durationSeconds: Math.round(distanceMeters / 11),
+  };
 }
 async function osrmRoute(origin: [number, number], destination: [number, number]) {
-	try {
-		const url = `https://router.project-osrm.org/route/v1/driving/${origin.join(",")};${destination.join(",")}?overview=full&geometries=geojson`;
-		const response = await fetch(url, { signal: AbortSignal.timeout(8_000) });
-		if (!response.ok) return fallbackRoute(origin, destination);
-		const body = await response.json() as { routes?: Array<{ geometry: unknown; distance: number; duration: number }> };
-		const route = body.routes?.[0];
-		return route ? { geometry: route.geometry, distanceMeters: route.distance, durationSeconds: route.duration } : fallbackRoute(origin, destination);
-	} catch { return fallbackRoute(origin, destination); }
+  try {
+    const url = `https://router.project-osrm.org/route/v1/driving/${origin.join(",")};${destination.join(",")}?overview=full&geometries=geojson`;
+    const response = await fetch(url, { signal: AbortSignal.timeout(8_000) });
+    if (!response.ok) return fallbackRoute(origin, destination);
+    const body = (await response.json()) as {
+      routes?: Array<{ geometry: unknown; distance: number; duration: number }>;
+    };
+    const route = body.routes?.[0];
+    return route
+      ? {
+          geometry: route.geometry,
+          distanceMeters: route.distance,
+          durationSeconds: route.duration,
+        }
+      : fallbackRoute(origin, destination);
+  } catch {
+    return fallbackRoute(origin, destination);
+  }
 }
 app.get("/api/health", (_request, response) => response.json({ status: "ok" }));
-app.post("/api/auth/register", rateLimit(rateLimitMessage("Too many sign-up attempts. Please wait a minute and try again.")), async (request, response, next) => { try { const input = z.object({ email: z.string().email("Enter a valid email address"), displayName: z.string().min(2, "Name must be at least 2 characters").max(80), password: z.string().min(12, "Password must be at least 12 characters").max(128), deviceName: z.string().min(2).max(80).default("Web browser"), locationMonitoringEnabled: z.boolean().default(false) }).parse(request.body); const passwordHash = await bcrypt.hash(input.password, 12); const user = await User.create({ email: input.email, displayName: input.displayName, passwordHash, locationMonitoringEnabled: input.locationMonitoringEnabled, trustedDevices: [{ name: input.deviceName }] }); response.status(201).json({ token: issueToken(String(user._id)), user: { id: user._id, email: user.email, displayName: user.displayName } }); } catch (error) { if (error instanceof Error && "code" in error && error.code === 11000) return response.status(409).json({ error: "An account with that email already exists" }); next(error); } });
-app.post("/api/auth/login", rateLimit({ windowMs: 60_000, limit: 8, message: { error: "Too many sign-in attempts. Please wait a minute and try again." } }), async (request, response, next) => { try { const input = z.object({ email: z.string().email("Enter a valid email address"), password: z.string().min(1, "Password is required"), deviceName: z.string().min(2).max(80).default("Web browser") }).parse(request.body); const user = await User.findOne({ email: input.email.toLowerCase() }).select("+passwordHash"); if (!user || !(await bcrypt.compare(input.password, user.passwordHash))) return response.status(401).json({ error: "Invalid email or password" }); user.trustedDevices.push({ name: input.deviceName, lastSeenAt: new Date(), createdAt: new Date() }); await user.save(); response.json({ token: issueToken(String(user._id)), user: { id: user._id, email: user.email, displayName: user.displayName } }); } catch (error) { next(error); } });
-app.get("/api/me", requireAuth, async (request: AuthRequest, response, next) => { try { const user = await User.findById(request.userId).lean(); if (!user) return response.status(404).json({ error: "User not found" }); const [contacts, trips] = await Promise.all([EmergencyContact.find({ userId: user._id }).sort({ priority: 1 }).lean(), Trip.find({ userId: user._id }).sort({ updatedAt: -1 }).limit(20).lean()]); response.json({ user: { id: user._id, email: user.email, displayName: user.displayName, phone: user.phone, safeWord: user.safeWord ?? { enabled: false, sensitivity: "normal" }, trustedDevices: user.trustedDevices }, contacts, trips }); } catch (error) { next(error); } });
-app.get("/api/safe-word/suggestions", async (_request, response, next) => { try { const suggestions = await SafeWordSuggestion.find().sort({ order: 1 }).lean(); response.json({ suggestions: suggestions.map((suggestion: { phrase: string; romanized?: string }) => ({ phrase: suggestion.phrase, romanized: suggestion.romanized })) }); } catch (error) { next(error); } });
-app.put("/api/me/safe-word", requireAuth, async (request: AuthRequest, response, next) => { try { const input = safeWordSchema.parse(request.body); const user = await User.findByIdAndUpdate(request.userId, { safeWord: { ...input, updatedAt: new Date() } }, { new: true }); if (!user) return response.status(404).json({ error: "User not found" }); response.json({ safeWord: user.safeWord }); } catch (error) { next(error); } });
-app.delete("/api/me/safe-word", requireAuth, async (request: AuthRequest, response, next) => { try { await User.findByIdAndUpdate(request.userId, { $unset: { safeWord: 1 } }); response.status(204).end(); } catch (error) { next(error); } });
-app.put("/api/me", requireAuth, async (request: AuthRequest, response, next) => { try { const input = z.object({ displayName: z.string().min(2).max(80), phone: z.string().trim().min(7).max(30).optional() }).parse(request.body); const user = await User.findByIdAndUpdate(request.userId, input, { new: true }); response.json({ id: user?._id, email: user?.email, displayName: user?.displayName, phone: user?.phone }); } catch (error) { next(error); } });
+app.post(
+  "/api/auth/register",
+  rateLimit(rateLimitMessage("Too many sign-up attempts. Please wait a minute and try again.")),
+  async (request, response, next) => {
+    try {
+      const input = z
+        .object({
+          email: z.string().email("Enter a valid email address"),
+          displayName: z.string().min(2, "Name must be at least 2 characters").max(80),
+          password: z.string().min(12, "Password must be at least 12 characters").max(128),
+          deviceName: z.string().min(2).max(80).default("Web browser"),
+          locationMonitoringEnabled: z.boolean().default(false),
+          plan: z.enum(["basic", "premium"]).default("basic"),
+        })
+        .parse(request.body);
+      const passwordHash = await bcrypt.hash(input.password, 12);
+      const user = await User.create({
+        email: input.email,
+        displayName: input.displayName,
+        passwordHash,
+        locationMonitoringEnabled: input.locationMonitoringEnabled,
+        plan: input.plan,
+        trustedDevices: [{ name: input.deviceName }],
+      });
+      response
+        .status(201)
+        .json({
+          token: issueToken(String(user._id)),
+          user: { id: user._id, email: user.email, displayName: user.displayName, plan: user.plan },
+        });
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === 11000)
+        return response.status(409).json({ error: "An account with that email already exists" });
+      next(error);
+    }
+  },
+);
+app.post(
+  "/api/auth/login",
+  rateLimit({
+    windowMs: 60_000,
+    limit: 8,
+    message: { error: "Too many sign-in attempts. Please wait a minute and try again." },
+  }),
+  async (request, response, next) => {
+    try {
+      const input = z
+        .object({
+          email: z.string().email("Enter a valid email address"),
+          password: z.string().min(1, "Password is required"),
+          deviceName: z.string().min(2).max(80).default("Web browser"),
+        })
+        .parse(request.body);
+      const user = await User.findOne({ email: input.email.toLowerCase() }).select("+passwordHash");
+      if (!user || !(await bcrypt.compare(input.password, user.passwordHash)))
+        return response.status(401).json({ error: "Invalid email or password" });
+      user.trustedDevices.push({
+        name: input.deviceName,
+        lastSeenAt: new Date(),
+        createdAt: new Date(),
+      });
+      await user.save();
+      response.json({
+        token: issueToken(String(user._id)),
+        user: { id: user._id, email: user.email, displayName: user.displayName },
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+app.get("/api/me", requireAuth, async (request: AuthRequest, response, next) => {
+  try {
+    const user = await User.findById(request.userId).lean();
+    if (!user) return response.status(404).json({ error: "User not found" });
+    const [contacts, trips] = await Promise.all([
+      EmergencyContact.find({ userId: user._id }).sort({ priority: 1 }).lean(),
+      Trip.find({ userId: user._id }).sort({ updatedAt: -1 }).limit(20).lean(),
+    ]);
+    response.json({
+      user: {
+        id: user._id,
+        email: user.email,
+        displayName: user.displayName,
+        phone: user.phone,
+        plan: user.plan ?? "basic",
+        safeWord: user.safeWord ?? { enabled: false, sensitivity: "normal" },
+        trustedDevices: user.trustedDevices,
+      },
+      contacts,
+      trips,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+app.put("/api/me/plan", requireAuth, async (request: AuthRequest, response, next) => {
+  try {
+    const input = z.object({ plan: z.enum(["basic", "premium"]) }).parse(request.body);
+    const user = await User.findByIdAndUpdate(request.userId, { plan: input.plan }, { new: true });
+    if (!user) return response.status(404).json({ error: "User not found" });
+    response.json({ plan: user.plan });
+  } catch (error) {
+    next(error);
+  }
+});
+app.get("/api/safe-word/suggestions", async (_request, response, next) => {
+  try {
+    const suggestions = await SafeWordSuggestion.find().sort({ order: 1 }).lean();
+    response.json({
+      suggestions: suggestions.map((suggestion: { phrase: string; romanized?: string }) => ({
+        phrase: suggestion.phrase,
+        romanized: suggestion.romanized,
+      })),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+app.put(
+  "/api/me/safe-word",
+  requireAuth,
+  requirePremium,
+  async (request: AuthRequest, response, next) => {
+    try {
+      const input = safeWordSchema.parse(request.body);
+      const user = await User.findByIdAndUpdate(
+        request.userId,
+        { safeWord: { ...input, updatedAt: new Date() } },
+        { new: true },
+      );
+      if (!user) return response.status(404).json({ error: "User not found" });
+      response.json({ safeWord: user.safeWord });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+app.delete("/api/me/safe-word", requireAuth, async (request: AuthRequest, response, next) => {
+  try {
+    await User.findByIdAndUpdate(request.userId, { $unset: { safeWord: 1 } });
+    response.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+app.put("/api/me", requireAuth, async (request: AuthRequest, response, next) => {
+  try {
+    const input = z
+      .object({
+        displayName: z.string().min(2).max(80),
+        phone: z.string().trim().min(7).max(30).optional(),
+      })
+      .parse(request.body);
+    const user = await User.findByIdAndUpdate(request.userId, input, { new: true });
+    response.json({
+      id: user?._id,
+      email: user?.email,
+      displayName: user?.displayName,
+      phone: user?.phone,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
 const MAX_EMERGENCY_CONTACTS = 2;
-app.post("/api/contacts", requireAuth, async (request: AuthRequest, response, next) => { try { const input = z.object({ name: z.string().min(2).max(80), phone: z.string().min(7).max(30), email: z.string().email(), priority: z.number().int().min(1).max(5).default(1) }).parse(request.body); const existingCount = await EmergencyContact.countDocuments({ userId: request.userId }); if (existingCount >= MAX_EMERGENCY_CONTACTS) return response.status(409).json({ error: `You can add up to ${MAX_EMERGENCY_CONTACTS} emergency contacts only` }); response.status(201).json(await EmergencyContact.create({ ...input, userId: request.userId })); } catch (error) { next(error); } });
-app.post("/api/push-subscriptions", requireAuth, async (request: AuthRequest, response, next) => { try { const subscription = z.object({ endpoint: z.string().url(), keys: z.object({ p256dh: z.string().min(1), auth: z.string().min(1) }) }).parse(request.body); await User.findByIdAndUpdate(request.userId, { $addToSet: { pushSubscriptions: subscription } }); response.status(204).end(); } catch (error) { next(error); } });
-app.delete("/api/contacts/:id", requireAuth, async (request: AuthRequest, response, next) => { try { const contact = await EmergencyContact.findOneAndDelete({ _id: request.params.id, userId: request.userId }); if (!contact) return response.status(404).json({ error: "Contact not found" }); response.status(204).end(); } catch (error) { next(error); } });
-app.get("/api/geocode", async (request, response, next) => { try { const query = z.string().min(2).max(200).parse(request.query.q).trim(); const key = query.toLowerCase(); const cached = geocodeCache.get(key); if (cached && Date.now() - cached.savedAt < GEOCODE_CACHE_MS) { if (!cached.place) return response.status(404).json({ error: "Place not found." }); return response.json(cached.place); } const upstream = await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=${encodeURIComponent(query)}`, { headers: { "accept-language": "en", "user-agent": "WaymarkSafety/1.0 (local development)" } }); if (!upstream.ok) throw new Error("Location service is unavailable"); const raw = ((await upstream.json()) as Array<{ display_name: string; lon: string; lat: string }>)[0] ?? null; const place = raw ? { lat: Number(raw.lat), lon: Number(raw.lon), displayName: raw.display_name } : null; geocodeCache.set(key, { savedAt: Date.now(), place }); if (!place) return response.status(404).json({ error: "Place not found." }); response.json(place); } catch (error) { next(error); } });
-app.get("/api/reverse-geocode", async (request, response, next) => { try { const latitude = z.coerce.number().min(-90).max(90).parse(request.query.lat); const longitude = z.coerce.number().min(-180).max(180).parse(request.query.lon); const address = await reverseGeocode(latitude, longitude); if (!address) return response.status(404).json({ error: "No address found for those coordinates." }); response.json({ ...address, short: shortAddress(address) }); } catch (error) { next(error); } });
-app.get("/api/environment", async (request, response, next) => { try { const latitude = z.coerce.number().parse(request.query.lat); const longitude = z.coerce.number().parse(request.query.lon); if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || Math.abs(latitude) > 90 || Math.abs(longitude) > 180) return response.status(400).json({ error: "Invalid coordinates" }); const scope = typeof request.query.scope === "string" ? request.query.scope : "all"; if (scope === "weather") return response.json(await Promise.all([getCurrentWeather(latitude, longitude), getWeatherForecast(latitude, longitude)]).then(([current, forecast]) => ({ current, forecast }))); if (scope === "air") return response.json(await Promise.all([getAirQuality(latitude, longitude), getAirQualityForecast(latitude, longitude)]).then(([current, forecast]) => ({ current, forecast }))); const [weather, air] = await Promise.all([Promise.all([getCurrentWeather(latitude, longitude), getWeatherForecast(latitude, longitude)]), Promise.all([getAirQuality(latitude, longitude), getAirQualityForecast(latitude, longitude)])]); response.json({ weather: { current: weather[0], forecast: weather[1] }, air: { current: air[0], forecast: air[1] } }); } catch (error) { next(error); } });
-app.get("/api/routing", async (request, response, next) => { try { const values = ["startLng", "startLat", "endLng", "endLat"].map((key) => Number(request.query[key])); if (values.some((value) => !Number.isFinite(value))) return response.status(400).json({ error: "Routing failed." }); const [startLng, startLat, endLng, endLat] = values; const aqi = Number(request.query.aqi ?? 0); const weatherAlert = request.query.weatherAlert === "true"; response.json(await getRoutePlan([startLng, startLat], [endLng, endLat], { aqi, weatherAlert })); } catch (error) { next(error); } });
-app.post("/api/travel-brief", async (request, response, next) => { try { const context = travelBriefSchema.parse(request.body); response.json(await buildTravelBrief(context)); } catch (error) { next(error); } });
-app.post("/api/trips", requireAuth, async (request: AuthRequest, response, next) => { try { const input = tripSchema.parse(request.body); const location = input.origin ?? input.destinationPoint; const [route, hospital, gauge] = await Promise.all([osrmRoute(location, input.destinationPoint), nearestHospital(location), nearestFloodGauge(location)]); const risk = await fetchLiveRisk(input.destinationPoint, route); const trip = await Trip.create({ userId: request.userId, destination: input.destination, destinationPoint: input.destinationPoint, travelDates: input.travelDates, route, currentRiskBrief: buildBrief(risk), riskHistory: [{ ...risk, summary: buildBrief(risk) }], shadowProfile: { lastLocation: { type: "Point", coordinates: location }, lastUpdated: new Date(), remainingRoute: route.geometry, nearestHospital: hospital ? { name: hospital.name, location: { type: "Point", coordinates: hospital.point } } : undefined, nearestFloodGauge: gauge ? { name: `${gauge.name}, ${gauge.district}`, location: { type: "Point", coordinates: gauge.point } } : undefined } }); response.status(201).json(trip); } catch (error) { next(error); } });
-app.put("/api/trips/:id/shadow-profile", requireAuth, async (request: AuthRequest, response, next) => { try { const input = z.object({ location: pointSchema }).parse(request.body); const trip = await Trip.findOne({ _id: request.params.id, userId: request.userId }); if (!trip) return response.status(404).json({ error: "Trip not found" }); const [longitude, latitude] = input.location.coordinates; const query = `[out:json];(nwr[amenity=hospital](around:10000,${latitude},${longitude});nwr[man_made=monitoring_station](around:15000,${latitude},${longitude}););out center;`;
-	const upstream = await fetch("https://overpass-api.de/api/interpreter", { method: "POST", headers: { "content-type": "text/plain" }, body: query, signal: AbortSignal.timeout(10_000) });
-	const elements = upstream.ok ? (await upstream.json() as { elements: Array<{ lat?: number; lon?: number; center?: { lat: number; lon: number }; tags?: { amenity?: string; man_made?: string; name?: string } }> }).elements : [];
-	const pointFor = (element?: { lat?: number; lon?: number; center?: { lat: number; lon: number }; tags?: { name?: string } }) => {
-	  const point = element ? { longitude: element.lon ?? element.center?.lon, latitude: element.lat ?? element.center?.lat } : null;
-	  return point?.longitude === undefined || point.latitude === undefined ? undefined : { name: element?.tags?.name ?? "Nearby safety station", location: { type: "Point", coordinates: [point.longitude, point.latitude] } };
-	};
-	const nearestByKind = (kind: "hospital" | "gauge") => {
-	  const candidates = elements.filter((element) => kind === "hospital" ? element.tags?.amenity === "hospital" : element.tags?.man_made === "monitoring_station" || element.tags?.name?.toLowerCase().includes("flood") || element.tags?.name?.toLowerCase().includes("gauge"));
-	  return candidates.sort((left, right) => {
-	    const distance = (element: { lon?: number; lat?: number; center?: { lon?: number; lat?: number } }) => {
-	      const point = element.center ?? { lon: element.lon, lat: element.lat };
-	      const dx = (point.lon ?? 0) - longitude;
-	      const dy = (point.lat ?? 0) - latitude;
-	      return dx * dx + dy * dy;
-	    };
-	    return distance(left) - distance(right);
-	  })[0];
-	};
-	const hospital = pointFor(nearestByKind("hospital")); const floodGauge = pointFor(nearestByKind("gauge")); trip.shadowProfile = { ...trip.shadowProfile, lastLocation: input.location, lastUpdated: new Date(), remainingRoute: trip.route?.geometry, ...(hospital ? { nearestHospital: hospital } : {}), ...(floodGauge ? { nearestFloodGauge: floodGauge } : {}) }; await trip.save(); response.json({ shadowProfile: trip.shadowProfile }); } catch (error) { next(error); } });
-app.get("/api/trips/:id", async (request, response, next) => { try { const trip = await Trip.findById(request.params.id).lean(); if (!trip) return response.status(404).json({ error: "Trip not found" }); response.json(trip); } catch (error) { next(error); } });
-app.post("/api/trips/:id/checkin", async (request, response, next) => { try { const deadline = new Date(Date.now() + 6 * 60 * 60 * 1000); const trip = await Trip.findByIdAndUpdate(request.params.id, { checkInDeadline: deadline }, { new: true }); if (!trip) return response.status(404).json({ error: "Trip not found" }); response.json({ checkInDeadline: trip.checkInDeadline }); } catch (error) { next(error); } });
-app.delete("/api/trips/:id", requireAuth, async (request: AuthRequest, response, next) => { try { const trip = await Trip.findOneAndDelete({ _id: request.params.id, userId: request.userId }); if (!trip) return response.status(404).json({ error: "Trip not found" }); response.status(204).end(); } catch (error) { next(error); } });
-app.post("/api/trips/:id/acknowledge", requireAuth, async (request: AuthRequest, response, next) => { try { const trip = await Trip.findOneAndUpdate({ _id: request.params.id, userId: request.userId }, { $unset: { riskAlert: 1 } }, { new: true }); if (!trip) return response.status(404).json({ error: "Trip not found" }); response.status(204).end(); } catch (error) { next(error); } });
-app.post("/api/trips/:id/refresh-risk", requireAuth, async (request: AuthRequest, response, next) => { try { const trip = await Trip.findOne({ _id: request.params.id, userId: request.userId }); if (!trip) return response.status(404).json({ error: "Trip not found" }); const destinationPoint: [number, number] | undefined = trip.destinationPoint?.length === 2 ? trip.destinationPoint as [number, number] : (trip.route?.geometry?.coordinates as Array<[number, number]> | undefined)?.slice(-1)[0]; if (!destinationPoint) return response.status(400).json({ error: "Trip has no destination point" }); const locationPoint = (trip.shadowProfile?.lastLocation?.coordinates as [number, number] | undefined) ?? destinationPoint; const [hospital, gauge, risk] = await Promise.all([nearestHospital(locationPoint), nearestFloodGauge(locationPoint), fetchLiveRisk(destinationPoint, trip.route)]); const summary = buildBrief(risk); trip.currentRiskBrief = summary; trip.riskHistory.push({ ...risk, summary }); if (!trip.shadowProfile) trip.shadowProfile = { lastLocation: { type: "Point", coordinates: destinationPoint }, lastUpdated: new Date() }; trip.shadowProfile.lastUpdated = new Date(); trip.shadowProfile.nearestHospital = hospital ? { name: hospital.name, location: { type: "Point", coordinates: hospital.point } } : undefined; trip.shadowProfile.nearestFloodGauge = gauge ? { name: `${gauge.name}, ${gauge.district}`, location: { type: "Point", coordinates: gauge.point } } : undefined; await trip.save(); response.json(trip); } catch (error) { next(error); } });
-app.get("/api/trips/:id/readiness", requireAuth, async (request: AuthRequest, response, next) => { try { const trip = await Trip.findOne({ _id: request.params.id, userId: request.userId }); if (!trip) return response.status(404).json({ error: "Trip not found" }); const READINESS_STALE_MS = 15 * 60 * 1000; const checkedAt = trip.readiness?.checkedAt ? new Date(trip.readiness.checkedAt).getTime() : 0; if (Date.now() - checkedAt > READINESS_STALE_MS) { const report = await buildReadinessReport(trip.route?.geometry); trip.readiness = { ...report, offlineMap: { ...report.offlineMap, status: trip.readiness?.offlineMap?.status ?? "pending" } }; await trip.save(); } response.json(trip.readiness); } catch (error) { next(error); } });
-app.post("/api/trips/:id/readiness/offline", requireAuth, async (request: AuthRequest, response, next) => { try { const trip = await Trip.findOneAndUpdate({ _id: request.params.id, userId: request.userId }, { $set: { "readiness.offlineMap.status": "downloaded", "readiness.offlineMap.downloadedAt": new Date() } }, { new: true }); if (!trip) return response.status(404).json({ error: "Trip not found" }); response.json({ offlineMap: trip.readiness?.offlineMap }); } catch (error) { next(error); } });
-app.get("/api/risk-alerts", requireAuth, async (request: AuthRequest, response, next) => { try { const trips = await Trip.find({ userId: request.userId, riskAlert: { $exists: true } }).select("destination riskAlert").lean(); response.json({ alerts: trips.map((trip) => ({ tripId: trip._id, destination: trip.destination, factor: trip.riskAlert?.factor, previous: trip.riskAlert?.previous, current: trip.riskAlert?.current })) }); } catch (error) { next(error); } });
-app.get("/api/sos/situations", async (_request, response, next) => { try { const situations = await listSituations(); response.json({ situations: situations.map(({ type, bn, en, service, serviceBn }) => ({ type, bn, en, service, serviceBn })) }); } catch (error) { next(error); } });
+app.post("/api/contacts", requireAuth, async (request: AuthRequest, response, next) => {
+  try {
+    const input = z
+      .object({
+        name: z.string().min(2).max(80),
+        phone: z.string().min(7).max(30),
+        email: z.string().email(),
+        priority: z.number().int().min(1).max(5).default(1),
+      })
+      .parse(request.body);
+    const existingCount = await EmergencyContact.countDocuments({ userId: request.userId });
+    if (existingCount >= MAX_EMERGENCY_CONTACTS)
+      return response
+        .status(409)
+        .json({ error: `You can add up to ${MAX_EMERGENCY_CONTACTS} emergency contacts only` });
+    response.status(201).json(await EmergencyContact.create({ ...input, userId: request.userId }));
+  } catch (error) {
+    next(error);
+  }
+});
+app.post("/api/push-subscriptions", requireAuth, async (request: AuthRequest, response, next) => {
+  try {
+    const subscription = z
+      .object({
+        endpoint: z.string().url(),
+        keys: z.object({ p256dh: z.string().min(1), auth: z.string().min(1) }),
+      })
+      .parse(request.body);
+    await User.findByIdAndUpdate(request.userId, {
+      $addToSet: { pushSubscriptions: subscription },
+    });
+    response.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+app.delete("/api/contacts/:id", requireAuth, async (request: AuthRequest, response, next) => {
+  try {
+    const contact = await EmergencyContact.findOneAndDelete({
+      _id: request.params.id,
+      userId: request.userId,
+    });
+    if (!contact) return response.status(404).json({ error: "Contact not found" });
+    response.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+app.get("/api/geocode", async (request, response, next) => {
+  try {
+    const query = z.string().min(2).max(200).parse(request.query.q).trim();
+    const key = query.toLowerCase();
+    const cached = geocodeCache.get(key);
+    if (cached && Date.now() - cached.savedAt < GEOCODE_CACHE_MS) {
+      if (!cached.place) return response.status(404).json({ error: "Place not found." });
+      return response.json(cached.place);
+    }
+    const upstream = await fetch(
+      `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=${encodeURIComponent(query)}`,
+      {
+        headers: { "accept-language": "en", "user-agent": "WaymarkSafety/1.0 (local development)" },
+      },
+    );
+    if (!upstream.ok) throw new Error("Location service is unavailable");
+    const raw =
+      ((await upstream.json()) as Array<{ display_name: string; lon: string; lat: string }>)[0] ??
+      null;
+    const place = raw
+      ? { lat: Number(raw.lat), lon: Number(raw.lon), displayName: raw.display_name }
+      : null;
+    geocodeCache.set(key, { savedAt: Date.now(), place });
+    if (!place) return response.status(404).json({ error: "Place not found." });
+    response.json(place);
+  } catch (error) {
+    next(error);
+  }
+});
+app.get("/api/reverse-geocode", async (request, response, next) => {
+  try {
+    const latitude = z.coerce.number().min(-90).max(90).parse(request.query.lat);
+    const longitude = z.coerce.number().min(-180).max(180).parse(request.query.lon);
+    const address = await reverseGeocode(latitude, longitude);
+    if (!address)
+      return response.status(404).json({ error: "No address found for those coordinates." });
+    response.json({ ...address, short: shortAddress(address) });
+  } catch (error) {
+    next(error);
+  }
+});
+app.get("/api/environment", async (request, response, next) => {
+  try {
+    const latitude = z.coerce.number().parse(request.query.lat);
+    const longitude = z.coerce.number().parse(request.query.lon);
+    if (
+      !Number.isFinite(latitude) ||
+      !Number.isFinite(longitude) ||
+      Math.abs(latitude) > 90 ||
+      Math.abs(longitude) > 180
+    )
+      return response.status(400).json({ error: "Invalid coordinates" });
+    const scope = typeof request.query.scope === "string" ? request.query.scope : "all";
+    if (scope === "weather")
+      return response.json(
+        await Promise.all([
+          getCurrentWeather(latitude, longitude),
+          getWeatherForecast(latitude, longitude),
+        ]).then(([current, forecast]) => ({ current, forecast })),
+      );
+    if (scope === "air")
+      return response.json(
+        await Promise.all([
+          getAirQuality(latitude, longitude),
+          getAirQualityForecast(latitude, longitude),
+        ]).then(([current, forecast]) => ({ current, forecast })),
+      );
+    const [weather, air] = await Promise.all([
+      Promise.all([
+        getCurrentWeather(latitude, longitude),
+        getWeatherForecast(latitude, longitude),
+      ]),
+      Promise.all([getAirQuality(latitude, longitude), getAirQualityForecast(latitude, longitude)]),
+    ]);
+    response.json({
+      weather: { current: weather[0], forecast: weather[1] },
+      air: { current: air[0], forecast: air[1] },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+app.get("/api/trip-time-optimization", async (request, response, next) => {
+  try {
+    const destLat = z.coerce.number().parse(request.query.destLat);
+    const destLng = z.coerce.number().parse(request.query.destLng);
+    const result = await recommendDepartureTime([destLng, destLat]);
+    if (result.degraded && result.options.length === 0)
+      return response.status(503).json({ error: result.explanation });
+    response.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+app.get("/api/routing", async (request, response, next) => {
+  try {
+    const values = ["startLng", "startLat", "endLng", "endLat"].map((key) =>
+      Number(request.query[key]),
+    );
+    if (values.some((value) => !Number.isFinite(value)))
+      return response.status(400).json({ error: "Routing failed." });
+    const [startLng, startLat, endLng, endLat] = values;
+    const aqi = Number(request.query.aqi ?? 0);
+    const weatherAlert = request.query.weatherAlert === "true";
+    response.json(
+      await getRoutePlan([startLng, startLat], [endLng, endLat], { aqi, weatherAlert }),
+    );
+  } catch (error) {
+    next(error);
+  }
+});
+app.post("/api/travel-brief", async (request, response, next) => {
+  try {
+    const context = travelBriefSchema.parse(request.body);
+    response.json(await buildTravelBrief(context));
+  } catch (error) {
+    next(error);
+  }
+});
+app.post("/api/trips", requireAuth, async (request: AuthRequest, response, next) => {
+  try {
+    const input = tripSchema.parse(request.body);
+    const location = input.origin ?? input.destinationPoint;
+    const [route, hospital, gauge] = await Promise.all([
+      osrmRoute(location, input.destinationPoint),
+      nearestHospital(location),
+      nearestFloodGauge(location),
+    ]);
+    const risk = await fetchLiveRisk(input.destinationPoint, route);
+    const trip = await Trip.create({
+      userId: request.userId,
+      destination: input.destination,
+      destinationPoint: input.destinationPoint,
+      travelDates: input.travelDates,
+      route,
+      currentRiskBrief: buildBrief(risk),
+      riskHistory: [{ ...risk, summary: buildBrief(risk) }],
+      shadowProfile: {
+        lastLocation: { type: "Point", coordinates: location },
+        lastUpdated: new Date(),
+        remainingRoute: route.geometry,
+        nearestHospital: hospital
+          ? { name: hospital.name, location: { type: "Point", coordinates: hospital.point } }
+          : undefined,
+        nearestFloodGauge: gauge
+          ? {
+              name: `${gauge.name}, ${gauge.district}`,
+              location: { type: "Point", coordinates: gauge.point },
+            }
+          : undefined,
+      },
+    });
+    response.status(201).json(trip);
+  } catch (error) {
+    next(error);
+  }
+});
+app.put(
+  "/api/trips/:id/shadow-profile",
+  requireAuth,
+  async (request: AuthRequest, response, next) => {
+    try {
+      const input = z.object({ location: pointSchema }).parse(request.body);
+      const trip = await Trip.findOne({ _id: request.params.id, userId: request.userId });
+      if (!trip) return response.status(404).json({ error: "Trip not found" });
+      const [longitude, latitude] = input.location.coordinates;
+      const query = `[out:json];(nwr[amenity=hospital](around:10000,${latitude},${longitude});nwr[man_made=monitoring_station](around:15000,${latitude},${longitude}););out center;`;
+      const upstream = await fetch("https://overpass-api.de/api/interpreter", {
+        method: "POST",
+        headers: { "content-type": "text/plain" },
+        body: query,
+        signal: AbortSignal.timeout(10_000),
+      });
+      const elements = upstream.ok
+        ? (
+            (await upstream.json()) as {
+              elements: Array<{
+                lat?: number;
+                lon?: number;
+                center?: { lat: number; lon: number };
+                tags?: { amenity?: string; man_made?: string; name?: string };
+              }>;
+            }
+          ).elements
+        : [];
+      const pointFor = (element?: {
+        lat?: number;
+        lon?: number;
+        center?: { lat: number; lon: number };
+        tags?: { name?: string };
+      }) => {
+        const point = element
+          ? {
+              longitude: element.lon ?? element.center?.lon,
+              latitude: element.lat ?? element.center?.lat,
+            }
+          : null;
+        return point?.longitude === undefined || point.latitude === undefined
+          ? undefined
+          : {
+              name: element?.tags?.name ?? "Nearby safety station",
+              location: { type: "Point", coordinates: [point.longitude, point.latitude] },
+            };
+      };
+      const nearestByKind = (kind: "hospital" | "gauge") => {
+        const candidates = elements.filter((element) =>
+          kind === "hospital"
+            ? element.tags?.amenity === "hospital"
+            : element.tags?.man_made === "monitoring_station" ||
+              element.tags?.name?.toLowerCase().includes("flood") ||
+              element.tags?.name?.toLowerCase().includes("gauge"),
+        );
+        return candidates.sort((left, right) => {
+          const distance = (element: {
+            lon?: number;
+            lat?: number;
+            center?: { lon?: number; lat?: number };
+          }) => {
+            const point = element.center ?? { lon: element.lon, lat: element.lat };
+            const dx = (point.lon ?? 0) - longitude;
+            const dy = (point.lat ?? 0) - latitude;
+            return dx * dx + dy * dy;
+          };
+          return distance(left) - distance(right);
+        })[0];
+      };
+      const hospital = pointFor(nearestByKind("hospital"));
+      const floodGauge = pointFor(nearestByKind("gauge"));
+      trip.shadowProfile = {
+        ...trip.shadowProfile,
+        lastLocation: input.location,
+        lastUpdated: new Date(),
+        remainingRoute: trip.route?.geometry,
+        ...(hospital ? { nearestHospital: hospital } : {}),
+        ...(floodGauge ? { nearestFloodGauge: floodGauge } : {}),
+      };
+      await trip.save();
+      response.json({ shadowProfile: trip.shadowProfile });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+app.get("/api/trips/:id", async (request, response, next) => {
+  try {
+    const trip = await Trip.findById(request.params.id).lean();
+    if (!trip) return response.status(404).json({ error: "Trip not found" });
+    response.json(trip);
+  } catch (error) {
+    next(error);
+  }
+});
+app.post("/api/trips/:id/checkin", async (request, response, next) => {
+  try {
+    const deadline = new Date(Date.now() + 6 * 60 * 60 * 1000);
+    const trip = await Trip.findByIdAndUpdate(
+      request.params.id,
+      { checkInDeadline: deadline },
+      { new: true },
+    );
+    if (!trip) return response.status(404).json({ error: "Trip not found" });
+    response.json({ checkInDeadline: trip.checkInDeadline });
+  } catch (error) {
+    next(error);
+  }
+});
+app.delete("/api/trips/:id", requireAuth, async (request: AuthRequest, response, next) => {
+  try {
+    const trip = await Trip.findOneAndDelete({ _id: request.params.id, userId: request.userId });
+    if (!trip) return response.status(404).json({ error: "Trip not found" });
+    response.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+app.post(
+  "/api/trips/:id/acknowledge",
+  requireAuth,
+  async (request: AuthRequest, response, next) => {
+    try {
+      const trip = await Trip.findOneAndUpdate(
+        { _id: request.params.id, userId: request.userId },
+        { $unset: { riskAlert: 1 } },
+        { new: true },
+      );
+      if (!trip) return response.status(404).json({ error: "Trip not found" });
+      response.status(204).end();
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+app.post(
+  "/api/trips/:id/refresh-risk",
+  requireAuth,
+  async (request: AuthRequest, response, next) => {
+    try {
+      const trip = await Trip.findOne({ _id: request.params.id, userId: request.userId });
+      if (!trip) return response.status(404).json({ error: "Trip not found" });
+      const destinationPoint: [number, number] | undefined =
+        trip.destinationPoint?.length === 2
+          ? (trip.destinationPoint as [number, number])
+          : (trip.route?.geometry?.coordinates as Array<[number, number]> | undefined)?.slice(
+              -1,
+            )[0];
+      if (!destinationPoint)
+        return response.status(400).json({ error: "Trip has no destination point" });
+      const locationPoint =
+        (trip.shadowProfile?.lastLocation?.coordinates as [number, number] | undefined) ??
+        destinationPoint;
+      const [hospital, gauge, risk] = await Promise.all([
+        nearestHospital(locationPoint),
+        nearestFloodGauge(locationPoint),
+        fetchLiveRisk(destinationPoint, trip.route),
+      ]);
+      const summary = buildBrief(risk);
+      trip.currentRiskBrief = summary;
+      trip.riskHistory.push({ ...risk, summary });
+      if (!trip.shadowProfile)
+        trip.shadowProfile = {
+          lastLocation: { type: "Point", coordinates: destinationPoint },
+          lastUpdated: new Date(),
+        };
+      trip.shadowProfile.lastUpdated = new Date();
+      trip.shadowProfile.nearestHospital = hospital
+        ? { name: hospital.name, location: { type: "Point", coordinates: hospital.point } }
+        : undefined;
+      trip.shadowProfile.nearestFloodGauge = gauge
+        ? {
+            name: `${gauge.name}, ${gauge.district}`,
+            location: { type: "Point", coordinates: gauge.point },
+          }
+        : undefined;
+      await trip.save();
+      response.json(trip);
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+app.get(
+  "/api/trips/:id/readiness",
+  requireAuth,
+  requirePremium,
+  async (request: AuthRequest, response, next) => {
+    try {
+      const trip = await Trip.findOne({ _id: request.params.id, userId: request.userId });
+      if (!trip) return response.status(404).json({ error: "Trip not found" });
+      const READINESS_STALE_MS = 15 * 60 * 1000;
+      const checkedAt = trip.readiness?.checkedAt
+        ? new Date(trip.readiness.checkedAt).getTime()
+        : 0;
+      if (Date.now() - checkedAt > READINESS_STALE_MS) {
+        const report = await buildReadinessReport(trip.route?.geometry);
+        trip.readiness = {
+          ...report,
+          offlineMap: {
+            ...report.offlineMap,
+            status: trip.readiness?.offlineMap?.status ?? "pending",
+          },
+        };
+        await trip.save();
+      }
+      response.json(trip.readiness);
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+app.post(
+  "/api/trips/:id/readiness/offline",
+  requireAuth,
+  requirePremium,
+  async (request: AuthRequest, response, next) => {
+    try {
+      const trip = await Trip.findOneAndUpdate(
+        { _id: request.params.id, userId: request.userId },
+        {
+          $set: {
+            "readiness.offlineMap.status": "downloaded",
+            "readiness.offlineMap.downloadedAt": new Date(),
+          },
+        },
+        { new: true },
+      );
+      if (!trip) return response.status(404).json({ error: "Trip not found" });
+      response.json({ offlineMap: trip.readiness?.offlineMap });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+app.get(
+  "/api/trips/:id/low-network-zones",
+  requireAuth,
+  requirePremium,
+  async (request: AuthRequest, response, next) => {
+    try {
+      const trip = await Trip.findOne({ _id: request.params.id, userId: request.userId });
+      if (!trip) return response.status(404).json({ error: "Trip not found" });
+      const zones = zonesAlongRoute(trip.route?.geometry);
+      const [contacts, bundles] = await Promise.all([
+        EmergencyContact.find({ userId: request.userId }).sort({ priority: 1 }).lean(),
+        Promise.all(zones.map((zoneItem) => emergencyBundleForZone(zoneItem))),
+      ]);
+      const zonePacks = zones.map((zoneItem, index) => {
+        const persisted = trip.lowNetworkPacks?.find(
+          (pack: { zoneId: string }) => pack.zoneId === zoneItem.id,
+        );
+        const tiles = offlineTilesForZone(zoneItem);
+        return {
+          zone: {
+            id: zoneItem.id,
+            name: zoneItem.name,
+            region: zoneItem.region,
+            description: zoneItem.description,
+            polygon: zoneItem.polygon,
+            centroid: zoneItem.centroid,
+          },
+          offlineMap: { ...tiles, status: persisted?.status ?? "pending" },
+          emergencyBundle: { personalContacts: contacts, nearbyServices: bundles[index] },
+        };
+      });
+      response.json({ zones: zonePacks });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+app.post(
+  "/api/trips/:id/low-network-zones/:zoneId/offline",
+  requireAuth,
+  requirePremium,
+  async (request: AuthRequest, response, next) => {
+    try {
+      const input = z
+        .object({
+          zoneName: z.string(),
+          zoom: z.number(),
+          tileCount: z.number(),
+          tiles: z.array(z.string()),
+          servicesCount: z.number(),
+          degraded: z.boolean(),
+          personalContactsCount: z.number(),
+        })
+        .parse(request.body);
+      const trip = await Trip.findOne({ _id: request.params.id, userId: request.userId });
+      if (!trip) return response.status(404).json({ error: "Trip not found" });
+      const pack = {
+        zoneId: request.params.zoneId,
+        zoneName: input.zoneName,
+        status: "downloaded" as const,
+        offlineMap: { zoom: input.zoom, tileCount: input.tileCount, tiles: input.tiles },
+        emergencyBundle: {
+          servicesCount: input.servicesCount,
+          degraded: input.degraded,
+          personalContactsCount: input.personalContactsCount,
+        },
+        downloadedAt: new Date(),
+      };
+      const existingIndex = (trip.lowNetworkPacks ?? []).findIndex(
+        (existing: { zoneId: string }) => existing.zoneId === request.params.zoneId,
+      );
+      if (existingIndex >= 0) trip.lowNetworkPacks[existingIndex] = pack;
+      else {
+        trip.lowNetworkPacks = trip.lowNetworkPacks ?? [];
+        trip.lowNetworkPacks.push(pack);
+      }
+      await trip.save();
+      response.json({ lowNetworkPacks: trip.lowNetworkPacks });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+app.get("/api/risk-alerts", requireAuth, async (request: AuthRequest, response, next) => {
+  try {
+    const trips = await Trip.find({ userId: request.userId, riskAlert: { $exists: true } })
+      .select("destination riskAlert")
+      .lean();
+    response.json({
+      alerts: trips.map((trip) => ({
+        tripId: trip._id,
+        destination: trip.destination,
+        factor: trip.riskAlert?.factor,
+        previous: trip.riskAlert?.previous,
+        current: trip.riskAlert?.current,
+      })),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+app.get("/api/sos/situations", async (_request, response, next) => {
+  try {
+    const situations = await listSituations();
+    response.json({
+      situations: situations.map(({ type, bn, en, service, serviceBn }) => ({
+        type,
+        bn,
+        en,
+        service,
+        serviceBn,
+      })),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
 // Composes the exact wording to read to a 999 operator (or SMS to a contact) from live GPS,
 // a ranked nearby landmark and the situation type. Separate from POST /api/sos on purpose:
 // the caller previews and can correct the script before anything is dispatched.
-app.post("/api/sos/script", requireAuth, rateLimit({ windowMs: 60_000, limit: 30 }), async (request: AuthRequest, response, next) => { try { const input = sosScriptSchema.parse(request.body); const user = await User.findById(request.userId).select("displayName phone").lean(); const script = await buildSosScript({ ...input, callerName: user?.displayName ?? "A Nirapod Jatra user", callerPhone: input.callerPhone ?? user?.phone }); response.json(script); } catch (error) { next(error); } });
+app.post(
+  "/api/sos/script",
+  requireAuth,
+  requirePremium,
+  rateLimit({ windowMs: 60_000, limit: 30 }),
+  async (request: AuthRequest, response, next) => {
+    try {
+      const input = sosScriptSchema.parse(request.body);
+      const user = await User.findById(request.userId).select("displayName phone").lean();
+      const script = await buildSosScript({
+        ...input,
+        callerName: user?.displayName ?? "A Nirapod Jatra user",
+        callerPhone: input.callerPhone ?? user?.phone,
+      });
+      response.json(script);
+    } catch (error) {
+      next(error);
+    }
+  },
+);
 const sosSchema = z.object({
-	tripId: z.string().optional(),
-	location: pointSchema.optional(),
-	accuracyM: z.number().nonnegative().optional(),
-	message: z.string().max(500).optional(),
-	situationType: z.enum(SITUATION_TYPES).default("unknown"),
-	trigger: z.enum(["button", "voice", "missed-checkin", "shake"]).default("button"),
-	voice: z.object({ heardText: z.string().max(200).optional(), confidence: z.number().min(0).max(1).optional() }).optional(),
-	// The client may pass a script it already generated (including one composed offline) so the
-	// alert that reaches contacts is the same text the user just saw on screen.
-	script: z.object({ speech: z.string().max(2000), sms: z.string().max(600), plain: z.string().max(2000), degraded: z.boolean().default(false) }).optional(),
+  tripId: z.string().optional(),
+  location: pointSchema.optional(),
+  accuracyM: z.number().nonnegative().optional(),
+  message: z.string().max(500).optional(),
+  situationType: z.enum(SITUATION_TYPES).default("unknown"),
+  trigger: z.enum(["button", "voice", "missed-checkin", "shake"]).default("button"),
+  voice: z
+    .object({
+      heardText: z.string().max(200).optional(),
+      confidence: z.number().min(0).max(1).optional(),
+    })
+    .optional(),
+  // The client may pass a script it already generated (including one composed offline) so the
+  // alert that reaches contacts is the same text the user just saw on screen.
+  script: z
+    .object({
+      speech: z.string().max(2000),
+      sms: z.string().max(600),
+      plain: z.string().max(2000),
+      degraded: z.boolean().default(false),
+    })
+    .optional(),
 });
-app.post("/api/sos", requireAuth, rateLimit({ windowMs: 60_000, limit: 5 }), async (request: AuthRequest, response, next) => { try {
-	const input = sosSchema.parse(request.body);
-	const [contacts, user] = await Promise.all([EmergencyContact.find({ userId: request.userId }).lean(), User.findById(request.userId).select("displayName phone").lean()]);
-	const requesterName = user?.displayName ?? "A Nirapod Jatra user";
-	const coordinates = input.location?.coordinates;
-	// Regenerate server-side when the client could not (offline composer unavailable, or the
-	// trigger was a missed check-in with no UI attached) so contacts still get the full context.
-	let script = input.script;
-	if (!script && coordinates) {
-		try {
-			const generated = await buildSosScript({ location: { lat: coordinates[1], lon: coordinates[0], accuracyM: input.accuracyM }, situationType: input.situationType as SituationType, note: input.message, callerPhone: user?.phone, language: "bn", callerName: requesterName });
-			script = { speech: generated.speech, sms: generated.sms, plain: generated.plain, degraded: generated.degraded };
-		} catch { script = undefined; }
-	}
-	const event = await SosEvent.create({ tripId: input.tripId, location: input.location, accuracyM: input.accuracyM, message: input.message, situationType: input.situationType, trigger: input.trigger, voice: input.voice, script, userId: request.userId });
-	const locationUrl = coordinates ? `https://www.google.com/maps?q=${coordinates[1]},${coordinates[0]}` : undefined;
-	const situationEntry = await getSituation(input.situationType as SituationType).catch(() => null);
-	const results = await Promise.all(contacts.map((contact) => sendSosAlertEmail(contact.email, { requesterName, message: input.message, locationUrl, timestamp: event.createdAt as Date, script: script?.plain, situation: situationEntry?.en })));
-	const emailsSent = results.filter(Boolean).length;
-	event.deliveries = contacts.map((contact, index) => ({ channel: "email", target: contact.email, status: results[index] ? "sent" : "failed", at: new Date() }));
-	await event.save();
-	io.emit("sos:new", event);
-	// smsDrafts let the client open the native composer prefilled per contact — a browser cannot
-	// send an SMS itself, and 999 does not accept SMS, so the user taps send on their own device.
-	const smsDrafts = script ? contacts.map((contact) => ({ name: contact.name, phone: contact.phone, body: script.sms })) : [];
-	response.status(201).json({ event, contactsNotified: contacts.length, emailsSent, smsDrafts });
-} catch (error) { next(error); } });
-app.post("/api/internal/risk-check", async (request, response, next) => { try { const secret = process.env.CRON_SECRET; if (!secret || request.headers.authorization !== `Bearer ${secret}`) return response.status(401).json({ error: "Unauthorized" }); const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000); const trips = await Trip.find({ "travelDates.end": { $gte: new Date() }, $or: [{ "riskHistory.timestamp": { $lt: sixHoursAgo } }, { riskHistory: { $size: 0 } }] }).select("_id userId destination destinationPoint route currentRiskBrief riskHistory").lean(); let updated = 0; await Promise.all(trips.map(async (trip) => { const destinationPoint: [number, number] | undefined = trip.destinationPoint?.length === 2 ? trip.destinationPoint : (trip.route?.geometry?.coordinates as Array<[number, number]> | undefined)?.slice(-1)[0]; if (!destinationPoint) return; const risk = await fetchLiveRisk(destinationPoint, trip.route); const summary = buildBrief(risk); const previous = trip.riskHistory?.length ? trip.riskHistory[trip.riskHistory.length - 1] as RiskInputs : null; let factor: string | null = null; let previousLevel = ""; let currentLevel = ""; if (previous) { const previousAqi = aqiLevel(previous.aqi ?? 2); const currentAqi = aqiLevel(risk.aqi); if (severityRank(currentAqi) > severityRank(previousAqi)) { factor = "AQI"; previousLevel = previousAqi; currentLevel = currentAqi; } else if (risk.weatherAlert && !previous.weatherAlert) { factor = "Weather"; previousLevel = "None"; currentLevel = "Warning"; } } const update: Record<string, unknown> = { currentRiskBrief: summary, $push: { riskHistory: { ...risk, summary } } }; if (factor) update.riskAlert = { factor, previous: previousLevel, current: currentLevel }; await Trip.findByIdAndUpdate(trip._id, update); const changed = trip.currentRiskBrief !== summary; if (changed) { updated += 1; io.emit("risk:update", { tripId: trip._id, summary }); const user = await User.findById(trip.userId).select("pushSubscriptions").lean(); await Promise.all((user?.pushSubscriptions ?? []).map((subscription: Parameters<typeof webpush.sendNotification>[0]) => webpush.sendNotification(subscription, JSON.stringify({ title: "Nirapod Jatra risk update", body: summary, tripId: trip._id })).catch(() => undefined))); } })); response.json({ checked: trips.length, updated }); } catch (error) { next(error); } });
-app.get("/api/pois/nearby", async (request, response, next) => { try { const longitude = z.coerce.number().parse(request.query.lng); const latitude = z.coerce.number().parse(request.query.lat); const query = `[out:json];(nwr[amenity=hospital](around:5000,${latitude},${longitude});nwr[amenity=shelter](around:5000,${latitude},${longitude});nwr[amenity=police](around:5000,${latitude},${longitude});nwr[amenity=pharmacy](around:5000,${latitude},${longitude});nwr[office=embassy](around:5000,${latitude},${longitude}););out center;`; const upstream = await fetch("https://overpass-api.de/api/interpreter", { method: "POST", headers: { "content-type": "text/plain" }, body: query, signal: AbortSignal.timeout(10_000) }); if (!upstream.ok) throw new Error("POI service is unavailable"); response.json(await upstream.json()); } catch (error) { next(error); } });
-app.get("/api/emergency-services/nearby", async (request, response, next) => { try { const longitude = z.coerce.number().parse(request.query.lng); const latitude = z.coerce.number().parse(request.query.lat); const radius = z.coerce.number().min(50).max(400).default(400).parse(request.query.radius); response.json(await nearbyEmergencyServices([longitude, latitude], radius)); } catch (error) { next(error); } });
-app.post("/api/internal/readiness-check", async (request, response, next) => { try { const secret = process.env.CRON_SECRET; if (!secret || request.headers.authorization !== `Bearer ${secret}`) return response.status(401).json({ error: "Unauthorized" }); const trips = await Trip.find({ "travelDates.end": { $gte: new Date() } }).select("_id userId readiness route").lean(); let escalated = 0; await Promise.all(trips.map(async (trip) => { const report = await buildReadinessReport(trip.route?.geometry); if (report.status !== "escalated" || trip.readiness?.status === "escalated") return; await Trip.updateOne({ _id: trip._id }, { $set: { readiness: { ...report, offlineMap: { ...report.offlineMap, status: trip.readiness?.offlineMap?.status ?? "pending" } } } }); escalated += 1; io.emit("readiness:update", { tripId: trip._id, status: report.status, warnings: report.warnings }); const user = await User.findById(trip.userId).select("pushSubscriptions").lean(); await Promise.all((user?.pushSubscriptions ?? []).map((subscription: Parameters<typeof webpush.sendNotification>[0]) => webpush.sendNotification(subscription, JSON.stringify({ title: "Nirapod Jatra readiness alert", body: `${report.warnings.length} warning(s) near your route. Pre-download the offline map and note the nearest shelter.`, tripId: trip._id })).catch(() => undefined))); })); response.json({ checked: trips.length, escalated }); } catch (error) { next(error); } });
-app.use((error: unknown, _request: express.Request, response: express.Response, _next: express.NextFunction) => { const message = error instanceof z.ZodError ? error.issues[0]?.message ?? "Invalid request" : error instanceof Error ? error.message : "Unexpected error"; response.status(error instanceof z.ZodError ? 400 : 500).json({ error: message }); });
+app.post(
+  "/api/sos",
+  requireAuth,
+  rateLimit({ windowMs: 60_000, limit: 5 }),
+  async (request: AuthRequest, response, next) => {
+    try {
+      const input = sosSchema.parse(request.body);
+      const [contacts, user] = await Promise.all([
+        EmergencyContact.find({ userId: request.userId }).lean(),
+        User.findById(request.userId).select("displayName phone email").lean(),
+      ]);
+      const requesterName = user?.displayName ?? "A Nirapod Jatra user";
+      const coordinates = input.location?.coordinates;
+      // Regenerate server-side when the client could not (offline composer unavailable, or the
+      // trigger was a missed check-in with no UI attached) so contacts still get the full context.
+      let script = input.script;
+      if (!script && coordinates) {
+        try {
+          const generated = await buildSosScript({
+            location: { lat: coordinates[1], lon: coordinates[0], accuracyM: input.accuracyM },
+            situationType: input.situationType as SituationType,
+            note: input.message,
+            callerPhone: user?.phone,
+            language: "bn",
+            callerName: requesterName,
+          });
+          script = {
+            speech: generated.speech,
+            sms: generated.sms,
+            plain: generated.plain,
+            degraded: generated.degraded,
+          };
+        } catch {
+          script = undefined;
+        }
+      }
+      const event = await SosEvent.create({
+        tripId: input.tripId,
+        location: input.location,
+        accuracyM: input.accuracyM,
+        message: input.message,
+        situationType: input.situationType,
+        trigger: input.trigger,
+        voice: input.voice,
+        script,
+        userId: request.userId,
+      });
+      const locationUrl = coordinates
+        ? `https://www.google.com/maps?q=${coordinates[1]},${coordinates[0]}`
+        : undefined;
+      const situationEntry = await getSituation(input.situationType as SituationType).catch(
+        () => null,
+      );
+      const results = await Promise.all(
+        contacts.map((contact) =>
+          sendSosAlertEmail(contact.email, {
+            requesterName,
+            requesterEmail: user?.email,
+            message: input.message,
+            locationUrl,
+            timestamp: event.createdAt as Date,
+            script: script?.plain,
+            situation: situationEntry?.en,
+          }),
+        ),
+      );
+      const emailsSent = results.filter((result) => result.sent).length;
+      const testPreviewUrls = results
+        .map((result) => result.testPreviewUrl)
+        .filter((url): url is string => Boolean(url));
+      event.deliveries = contacts.map((contact, index) => ({
+        channel: "email",
+        target: contact.email,
+        status: results[index].sent ? "sent" : "failed",
+        at: new Date(),
+      }));
+      await event.save();
+      io.emit("sos:new", event);
+      // smsDrafts let the client open the native composer prefilled per contact — a browser cannot
+      // send an SMS itself, and 999 does not accept SMS, so the user taps send on their own device.
+      const smsDrafts = script
+        ? contacts.map((contact) => ({
+            name: contact.name,
+            phone: contact.phone,
+            body: script.sms,
+          }))
+        : [];
+      response
+        .status(201)
+        .json({
+          event,
+          contactsNotified: contacts.length,
+          emailsSent,
+          smsDrafts,
+          ...(testPreviewUrls.length ? { testMode: true, testPreviewUrls } : {}),
+        });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+const locationShareStartSchema = z.object({
+  location: pointSchema,
+  accuracy: z.number().optional(),
+  durationMinutes: z
+    .number()
+    .int()
+    .min(15)
+    .max(24 * 60)
+    .default(360),
+});
+app.post(
+  "/api/location-share/start",
+  requireAuth,
+  requirePremium,
+  rateLimit({ windowMs: 60_000, limit: 5 }),
+  async (request: AuthRequest, response, next) => {
+    try {
+      const input = locationShareStartSchema.parse(request.body);
+      const [contacts, user] = await Promise.all([
+        EmergencyContact.find({ userId: request.userId }).lean(),
+        User.findById(request.userId).select("displayName email").lean(),
+      ]);
+      await LocationShare.updateMany({ userId: request.userId, active: true }, { active: false });
+      const requesterName = user?.displayName ?? "A Nirapod Jatra user";
+      const expiresAt = new Date(Date.now() + input.durationMinutes * 60_000);
+      const share = await LocationShare.create({
+        userId: request.userId,
+        token: randomUUID().replace(/-/g, ""),
+        requesterName,
+        expiresAt,
+        location: input.location,
+        accuracy: input.accuracy,
+        lastUpdatedAt: new Date(),
+      });
+      const shareUrl = `${process.env.CLIENT_ORIGIN ?? "http://localhost:3000"}/share/${share.token}`;
+      const results = await Promise.all(
+        contacts.map((contact) =>
+          sendLocationShareEmail(contact.email, {
+            requesterName,
+            requesterEmail: user?.email,
+            shareUrl,
+            expiresAt,
+          }),
+        ),
+      );
+      const emailsSent = results.filter((result) => result.sent).length;
+      const testPreviewUrls = results
+        .map((result) => result.testPreviewUrl)
+        .filter((url): url is string => Boolean(url));
+      response
+        .status(201)
+        .json({
+          token: share.token,
+          shareUrl,
+          expiresAt,
+          contactsNotified: contacts.length,
+          emailsSent,
+          ...(testPreviewUrls.length ? { testMode: true, testPreviewUrls } : {}),
+        });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+app.put(
+  "/api/location-share/:token/location",
+  requireAuth,
+  async (request: AuthRequest, response, next) => {
+    try {
+      const input = z
+        .object({ location: pointSchema, accuracy: z.number().optional() })
+        .parse(request.body);
+      const share = await LocationShare.findOne({
+        token: request.params.token,
+        userId: request.userId,
+        active: true,
+      });
+      if (!share) return response.status(404).json({ error: "Active location share not found" });
+      if (share.expiresAt < new Date()) {
+        share.active = false;
+        await share.save();
+        return response.status(410).json({ error: "Location share has expired" });
+      }
+      share.location = input.location;
+      share.accuracy = input.accuracy;
+      share.lastUpdatedAt = new Date();
+      await share.save();
+      response.status(204).end();
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+app.post("/api/location-share/stop", requireAuth, async (request: AuthRequest, response, next) => {
+  try {
+    await LocationShare.updateMany({ userId: request.userId, active: true }, { active: false });
+    response.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+app.get("/api/location-share/:token", async (request, response, next) => {
+  try {
+    const share = await LocationShare.findOne({ token: request.params.token }).lean();
+    if (!share) return response.status(404).json({ error: "Location share not found" });
+    const active = share.active && share.expiresAt > new Date();
+    response.json({
+      active,
+      requesterName: share.requesterName,
+      location: share.location,
+      accuracy: share.accuracy,
+      lastUpdatedAt: share.lastUpdatedAt,
+      expiresAt: share.expiresAt,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+app.post("/api/internal/risk-check", async (request, response, next) => {
+  try {
+    const secret = process.env.CRON_SECRET;
+    if (!secret || request.headers.authorization !== `Bearer ${secret}`)
+      return response.status(401).json({ error: "Unauthorized" });
+    const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000);
+    const trips = await Trip.find({
+      "travelDates.end": { $gte: new Date() },
+      $or: [{ "riskHistory.timestamp": { $lt: sixHoursAgo } }, { riskHistory: { $size: 0 } }],
+    })
+      .select("_id userId destination destinationPoint route currentRiskBrief riskHistory")
+      .lean();
+    let updated = 0;
+    await Promise.all(
+      trips.map(async (trip) => {
+        const destinationPoint: [number, number] | undefined =
+          trip.destinationPoint?.length === 2
+            ? trip.destinationPoint
+            : (trip.route?.geometry?.coordinates as Array<[number, number]> | undefined)?.slice(
+                -1,
+              )[0];
+        if (!destinationPoint) return;
+        const risk = await fetchLiveRisk(destinationPoint, trip.route);
+        const summary = buildBrief(risk);
+        const previous = trip.riskHistory?.length
+          ? (trip.riskHistory[trip.riskHistory.length - 1] as RiskInputs)
+          : null;
+        let factor: string | null = null;
+        let previousLevel = "";
+        let currentLevel = "";
+        if (previous) {
+          const previousAqi = aqiLevel(previous.aqi ?? 2);
+          const currentAqi = aqiLevel(risk.aqi);
+          if (severityRank(currentAqi) > severityRank(previousAqi)) {
+            factor = "AQI";
+            previousLevel = previousAqi;
+            currentLevel = currentAqi;
+          } else if (risk.weatherAlert && !previous.weatherAlert) {
+            factor = "Weather";
+            previousLevel = "None";
+            currentLevel = "Warning";
+          }
+        }
+        const update: Record<string, unknown> = {
+          currentRiskBrief: summary,
+          $push: { riskHistory: { ...risk, summary } },
+        };
+        if (factor) update.riskAlert = { factor, previous: previousLevel, current: currentLevel };
+        await Trip.findByIdAndUpdate(trip._id, update);
+        const changed = trip.currentRiskBrief !== summary;
+        if (changed) {
+          updated += 1;
+          io.emit("risk:update", { tripId: trip._id, summary });
+          const user = await User.findById(trip.userId).select("pushSubscriptions").lean();
+          await Promise.all(
+            (user?.pushSubscriptions ?? []).map(
+              (subscription: Parameters<typeof webpush.sendNotification>[0]) =>
+                webpush
+                  .sendNotification(
+                    subscription,
+                    JSON.stringify({
+                      title: "Nirapod Jatra risk update",
+                      body: summary,
+                      tripId: trip._id,
+                    }),
+                  )
+                  .catch(() => undefined),
+            ),
+          );
+        }
+      }),
+    );
+    response.json({ checked: trips.length, updated });
+  } catch (error) {
+    next(error);
+  }
+});
+app.get("/api/pois/nearby", async (request, response, next) => {
+  try {
+    const longitude = z.coerce.number().parse(request.query.lng);
+    const latitude = z.coerce.number().parse(request.query.lat);
+    const query = `[out:json];(nwr[amenity=hospital](around:5000,${latitude},${longitude});nwr[amenity=shelter](around:5000,${latitude},${longitude});nwr[amenity=police](around:5000,${latitude},${longitude});nwr[amenity=pharmacy](around:5000,${latitude},${longitude});nwr[office=embassy](around:5000,${latitude},${longitude}););out center;`;
+    const upstream = await fetch("https://overpass-api.de/api/interpreter", {
+      method: "POST",
+      headers: { "content-type": "text/plain" },
+      body: query,
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!upstream.ok) throw new Error("POI service is unavailable");
+    response.json(await upstream.json());
+  } catch (error) {
+    next(error);
+  }
+});
+app.get("/api/emergency-services/nearby", async (request, response, next) => {
+  try {
+    const longitude = z.coerce.number().parse(request.query.lng);
+    const latitude = z.coerce.number().parse(request.query.lat);
+    const radius = z.coerce.number().min(50).max(400).default(400).parse(request.query.radius);
+    response.json(await nearbyEmergencyServices([longitude, latitude], radius));
+  } catch (error) {
+    next(error);
+  }
+});
+app.get("/api/attractions", async (request, response, next) => {
+  try {
+    const latitude = z.coerce.number().parse(request.query.lat);
+    const longitude = z.coerce.number().parse(request.query.lon);
+    if (
+      !Number.isFinite(latitude) ||
+      !Number.isFinite(longitude) ||
+      Math.abs(latitude) > 90 ||
+      Math.abs(longitude) > 180
+    )
+      return response.status(400).json({ error: "Invalid coordinates" });
+    const destination =
+      typeof request.query.destination === "string" && request.query.destination.trim()
+        ? request.query.destination.trim()
+        : "this destination";
+    const radius = z.coerce.number().min(500).max(10000).default(10000).parse(request.query.radius);
+    const [{ attractions, degraded }, bestTimeToVisit] = await Promise.all([
+      findTouristAttractions([longitude, latitude], radius),
+      buildBestTimeToVisit(destination, latitude),
+    ]);
+    response.json({ attractions, degraded, bestTimeToVisit });
+  } catch (error) {
+    next(error);
+  }
+});
+app.post("/api/internal/readiness-check", async (request, response, next) => {
+  try {
+    const secret = process.env.CRON_SECRET;
+    if (!secret || request.headers.authorization !== `Bearer ${secret}`)
+      return response.status(401).json({ error: "Unauthorized" });
+    const trips = await Trip.find({ "travelDates.end": { $gte: new Date() } })
+      .select("_id userId readiness route")
+      .lean();
+    let escalated = 0;
+    await Promise.all(
+      trips.map(async (trip) => {
+        const report = await buildReadinessReport(trip.route?.geometry);
+        if (report.status !== "escalated" || trip.readiness?.status === "escalated") return;
+        await Trip.updateOne(
+          { _id: trip._id },
+          {
+            $set: {
+              readiness: {
+                ...report,
+                offlineMap: {
+                  ...report.offlineMap,
+                  status: trip.readiness?.offlineMap?.status ?? "pending",
+                },
+              },
+            },
+          },
+        );
+        escalated += 1;
+        io.emit("readiness:update", {
+          tripId: trip._id,
+          status: report.status,
+          warnings: report.warnings,
+        });
+        const user = await User.findById(trip.userId).select("pushSubscriptions").lean();
+        await Promise.all(
+          (user?.pushSubscriptions ?? []).map(
+            (subscription: Parameters<typeof webpush.sendNotification>[0]) =>
+              webpush
+                .sendNotification(
+                  subscription,
+                  JSON.stringify({
+                    title: "Nirapod Jatra readiness alert",
+                    body: `${report.warnings.length} warning(s) near your route. Pre-download the offline map and note the nearest shelter.`,
+                    tripId: trip._id,
+                  }),
+                )
+                .catch(() => undefined),
+          ),
+        );
+      }),
+    );
+    response.json({ checked: trips.length, escalated });
+  } catch (error) {
+    next(error);
+  }
+});
+app.use(
+  (
+    error: unknown,
+    _request: express.Request,
+    response: express.Response,
+    _next: express.NextFunction,
+  ) => {
+    const message =
+      error instanceof z.ZodError
+        ? (error.issues[0]?.message ?? "Invalid request")
+        : error instanceof Error
+          ? error.message
+          : "Unexpected error";
+    response.status(error instanceof z.ZodError ? 400 : 500).json({ error: message });
+  },
+);
 httpServer.listen(port, () => console.log(`Safety API listening on ${port}`));
 void connectDatabase()
-	.then(async () => {
-		console.log("Database connected");
-		// Idempotent: inserts the situation catalogue and safe-word suggestions only if missing,
-		// so a fresh clone of this repo has a working database without any manual import step.
-		const seeded = await seedReferenceData();
-		if (seeded.situationsInserted || seeded.suggestionsInserted) console.log(`Seeded reference data: ${seeded.situationsInserted} situation(s), ${seeded.suggestionsInserted} safe-word suggestion(s)`);
-	})
-	.catch((error) => console.error("Database connection failed; database-backed routes are unavailable", error));
+  .then(async () => {
+    console.log("Database connected");
+    // Idempotent: inserts the situation catalogue and safe-word suggestions only if missing,
+    // so a fresh clone of this repo has a working database without any manual import step.
+    const seeded = await seedReferenceData();
+    if (seeded.situationsInserted || seeded.suggestionsInserted)
+      console.log(
+        `Seeded reference data: ${seeded.situationsInserted} situation(s), ${seeded.suggestionsInserted} safe-word suggestion(s)`,
+      );
+  })
+  .catch((error) =>
+    console.error("Database connection failed; database-backed routes are unavailable", error),
+  );

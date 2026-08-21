@@ -1,1 +1,6 @@
-export type { AirQuality, AirQualityForecastPoint, CurrentWeather, WeatherForecastDay } from "./types";
+export type {
+  AirQuality,
+  AirQualityForecastPoint,
+  CurrentWeather,
+  WeatherForecastDay,
+} from "./types";
